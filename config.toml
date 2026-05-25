@@ -1,0 +1,102 @@
+[database]
+url = "postgresql://arbpulse:arbpulse@localhost:5432/arbpulse"
+
+[network]
+rpc_http = "https://pulsechain-rpc.publicnode.com"
+rpc_ws = "wss://pulsechain-rpc.publicnode.com"
+chain_id = 369
+
+[redis]
+url = "redis://127.0.0.1:6379"
+
+[registry]
+url = "http://127.0.0.1:3001"
+min_tvl_usd = 50.0
+
+[api]
+host = "127.0.0.1"
+port = 3000
+
+[[dexes]]
+name = "pulsex_v2"
+enabled = true
+factory = "0x29eA7545DEf87022BAdc76323F373EA1e707C523"
+router = "0x165C3410fC91EF562C50559f7d2289fEbed552d9"
+dex_type = "UniswapV2"
+fee_bps = 30
+
+[[dexes]]
+name = "pulsex_v1"
+enabled = false
+factory = "0x1715a3E4A142d8b698131108995174F37aEBA10D"
+router = "0x98bf93ebf5c380C0e6Ae8e192A7e2AE08edAcc02"
+dex_type = "UniswapV2"
+fee_bps = 30
+
+[[dexes]]
+name = "nineinch_v2"
+enabled = true
+factory = "0x3a0Fa7884dD93f3cd234bBE2A0958Ef04b05E13b"
+router = ""
+dex_type = "UniswapV2"
+fee_bps = 30
+
+[[dexes]]
+name = "ninemm_v2"
+enabled = true
+factory = "0x3a0Fa7884dD93f3cd234bBE2A0958Ef04b05E13b"
+router = ""
+dex_type = "UniswapV2"
+fee_bps = 17
+
+# Opportunity Finder (PathFinder, module #2) settings.
+[finder]
+# Base token to start/end every arbitrage cycle in. USDC from Ethereum keeps its
+# Ethereum address on PulseChain (forked state). VERIFY this is the pool token
+# the listener actually tracks before relying on it.
+token_in = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+token_in_decimals = 6
+# Max swaps per cycle (2 = USDC->X->USDC, 3 = USDC->X->Y->USDC, ...).
+max_hops = 3
+# Minimum NET profit (in token_in, human units) to emit an opportunity.
+min_profit = 0.05
+# Cap on trade size (token_in human units). 0 = unbounded (size = optimal x*).
+max_trade_size = 10000.0
+# Flash-loan fee in bps charged on the borrowed notional. 0 = PHUX / own capital.
+loan_fee_bps = 0
+# Rough gas cost per arb tx, expressed in token_in human units (placeholder).
+gas_cost = 0.5
+# Safety cap on the number of structural cycles enumerated at startup.
+max_cycles = 200000
+# Redis pub/sub channel opportunities are published to (for the Sender).
+output_channel = "opportunities"
+
+# Transaction Broadcaster (Sender, module #3) settings.
+# The signing key is NOT stored here — set the PRIVATE_KEY env var.
+[broadcaster]
+# Deployed ArbExecutor contract address (see contracts/). REQUIRED.
+contract = "0x0cC54381f540A59E75A8736b4699A34CE2fb9536"
+# Channel to consume opportunities from (must match finder.output_channel).
+opportunities_channel = "opportunities"
+# Fixed gas limit per arb tx (no pre-send estimation in fire-and-forget mode).
+gas_limit = 800000
+# Priority-fee floor (gwei) added on top of the network estimate to win inclusion.
+priority_fee_gwei = 5.0
+# Hard cap on maxFeePerGas (gwei). MUST stay well above PulseChain's prevailing
+# base fee (~500k-600k gwei) or txs become un-includable (EIP-1559 requires
+# maxFeePerGas >= block baseFee) and sit in the mempool. This is a spike guard,
+# not a normal-operation limit — you only ever pay base+priority, capped here.
+max_fee_gwei = 2000000.0
+# Drop opportunities older than this many blocks behind the chain tip.
+max_opportunity_age_blocks = 2
+# Floor passed as the contract's minProfit guard, in raw token_in units. 0 = only
+# guarantee no principal loss (gas risk accepted in fire-and-forget mode).
+min_profit_raw = "0"
+# Pre-send eth_call simulation. true (default) skips any tx that would revert
+# on-chain (fee-on-transfer tokens, stale reserves, etc.) before spending gas.
+# Costs one extra RPC round-trip per opportunity. Set false to restore pure
+# fire-and-forget behavior.
+simulate = true
+# Max seconds to wait for a sent tx's receipt before abandoning the wait, so one
+# un-includable tx can't stall the single-in-flight broadcaster. ~45s ≈ 4 blocks.
+receipt_timeout_secs = 45

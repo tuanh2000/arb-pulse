@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/listener", "crates/pool-registry", "crates/opportunity-finder", "crates/transaction-broadcaster", "crates/orchestrator"]
+resolver = "2"

@@ -1,0 +1,93 @@
+[network]
+rpc_http = "https://pulsechain-rpc.publicnode.com"
+
+# DEX factories to enumerate — mirrors listener config but only needs factory address + name
+[[dexes]]
+name = "pulsex_v2"
+enabled = true
+factory = "0x29eA7545DEf87022BAdc76323F373EA1e707C523"
+
+# Verified on-chain: 64,919 pairs.
+[[dexes]]
+name = "pulsex_v1"
+enabled = true
+factory = "0x1715a3E4A142d8b698131108995174F37aEBA10D"
+
+[[dexes]]
+name = "nineinch_v2"
+enabled = true
+factory = "0x3a0Fa7884dD93f3cd234bBE2A0958Ef04b05E13b"
+
+# TODO: needs the REAL 9mm V2 factory — this address is 9inch's (3,499 pairs),
+# not 9mm's. Disabled until the correct factory is set. Enable once verified.
+[[dexes]]
+name = "ninemm_v2"
+enabled = false
+factory = "0x3a0Fa7884dD93f3cd234bBE2A0958Ef04b05E13b"
+
+[database]
+url = "postgresql://arbpulse:arbpulse@localhost:5432/arbpulse"
+max_connections = 10
+
+[api]
+host = "127.0.0.1"
+port = 3001
+
+[worker]
+# pools to fetch per batch from DB (ordered by updated_at ASC)
+batch_size = 100
+# seconds to sleep when no pools need processing
+idle_sleep_secs = 30
+# milliseconds to sleep between Multicall3 batches (RPC throttle)
+batch_delay_ms = 200
+
+[price_updater]
+# Seconds between full token price refreshes (on-chain reserve oracle)
+refresh_interval_secs = 300
+# Minimum USD on a pool's anchor side for its price to be trusted. Lower = more
+# (smaller) tokens priced but noisier; higher = only deep, well-capitalized pools.
+min_anchor_liquidity_usd = 100.0
+
+[filter]
+min_tvl_usd = 200.0
+
+[[filter.anchor_tokens]]
+address = "0xA1077a294dDE1B09bB078844df40758a5D0f9a27"
+symbol = "WPLS"
+
+[[filter.anchor_tokens]]
+address = "0x95B303987A60C71504D99Aa1b13B4DA07b0790ab"
+symbol = "PLSX"
+
+[[filter.anchor_tokens]]
+address = "0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39"
+symbol = "HEX"
+
+[[filter.anchor_tokens]]
+address = "0x02DcdD04e3F455D838cd1249292C58f3B79e3C3C"
+symbol = "WETH"
+
+# Trusted tier-2 anchors: priced from their stable/WPLS pool, then used to price
+# tokens paired with them (one extra hop). Add/remove freely.
+[[filter.anchor_tokens]]
+address = "0x9663c2d75ffd5f4017310405fce61720af45b829"
+symbol = "PHUX"
+
+[[filter.anchor_tokens]]
+address = "0x2fa878ab3f87cc1c9737fc071108f904c0b0c95d"
+symbol = "INC"
+
+[[filter.anchor_tokens]]
+address = "0x15D38573d2feeb82e7ad5187aB8c1D52810B1f07"
+symbol = "USDC"
+hardcoded_price_usd = 1.0
+
+[[filter.anchor_tokens]]
+address = "0x0Cb6F5a34ad42ec934882a05265A7d5F59b51A2f"
+symbol = "USDT"
+hardcoded_price_usd = 1.0
+
+[[filter.anchor_tokens]]
+address = "0xefD766cCb38EaF1dfd701853BFCe31359239F305"
+symbol = "DAI"
+hardcoded_price_usd = 1.0

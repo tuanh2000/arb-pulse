@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Foundry / Solidity build artifacts
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+
+# Logs
+logs/
+*.log
+
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+PRIVATE_KEY
+
+# Runtime state
+run/
+.claude/scheduled_tasks.lock
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
