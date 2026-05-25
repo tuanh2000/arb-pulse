@@ -36,6 +36,10 @@ async fn run_inner(config: &AppConfig, store: &PoolStore, sink: &RedisSink) -> R
     let mut block_stream = block_sub.into_stream();
     // Highest block we have already signalled as complete (0 = none yet).
     let mut last_completed: u64 = 0;
+    // Timestamp (seconds since epoch) of the most recently received block header.
+    // When we signal block N complete we pass N's timestamp, which we captured
+    // one iteration ago (block N+1 triggers the signal for N).
+    let mut prev_block_timestamp: u64 = 0;
 
     tracing::info!("WebSocket state-change subscription active");
 
@@ -116,13 +120,14 @@ async fn run_inner(config: &AppConfig, store: &PoolStore, sink: &RedisSink) -> R
                 // is enough, the finder evaluates its whole dirty set at once).
                 let completed = header.number.saturating_sub(1);
                 if completed > last_completed {
-                    if let Err(e) = sink.publish_block_complete(completed).await {
+                    if let Err(e) = sink.publish_block_complete(completed, prev_block_timestamp).await {
                         tracing::warn!(block = completed, error = %e, "Failed to publish block_complete");
                     } else {
                         tracing::debug!(head = header.number, block_complete = completed, "Signalled block complete");
                     }
                     last_completed = completed;
                 }
+                prev_block_timestamp = header.timestamp;
             }
             _ = ticker.tick() => {
                 tracing::info!(

@@ -111,9 +111,11 @@ impl RedisSink {
     /// Publish a single "block `block` fully processed" signal. The PathFinder
     /// uses this as its evaluation trigger: it applies reserve deltas from
     /// `pool_updates` as they arrive, then evaluates once per block on this ping.
-    pub async fn publish_block_complete(&self, block: u64) -> Result<()> {
+    /// `block_timestamp_s` is the block's on-chain timestamp (seconds since epoch)
+    /// so downstream can measure end-to-end latency from block creation.
+    pub async fn publish_block_complete(&self, block: u64, block_timestamp_s: u64) -> Result<()> {
         let mut conn = self.conn.clone();
-        let payload = serde_json::json!({ "block": block }).to_string();
+        let payload = serde_json::json!({ "block": block, "block_ts": block_timestamp_s }).to_string();
         let _: () = conn.publish(BLOCK_COMPLETE_CHANNEL, payload).await?;
         Ok(())
     }

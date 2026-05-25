@@ -14,7 +14,7 @@ use emitter::Emitter;
 use finder::{evaluate, EvalParams};
 use futures::StreamExt;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use store::PoolStore;
 use tracing::{debug, info, warn};
 use types::{Opportunity, PoolUpdate};
@@ -212,18 +212,32 @@ async fn main() -> Result<()> {
 
         // ── Trigger path: evaluate every dirtied cycle once for this block. ──
         if channel == source::BLOCK_COMPLETE_CHANNEL {
-            let block = serde_json::from_str::<serde_json::Value>(&payload)
-                .ok()
-                .and_then(|v| v["block"].as_u64())
-                .unwrap_or(0);
+            let parsed = serde_json::from_str::<serde_json::Value>(&payload).ok();
+            let block = parsed.as_ref().and_then(|v| v["block"].as_u64()).unwrap_or(0);
+            let block_ts = parsed.as_ref().and_then(|v| v["block_ts"].as_u64()).unwrap_or(0);
+
+            // Measure wall-clock lag from when this block was created on-chain.
+            // Block timestamps are seconds; we compute ms precision from our own clock.
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let block_age_ms = if block_ts > 0 {
+                now_ms.saturating_sub(block_ts * 1000)
+            } else {
+                0
+            };
 
             let dirty = dirty_cycles.len();
             if dirty > 0 {
                 info!(
                     block,
+                    block_age_ms,
                     dirty_cycles = dirty,
                     "search start — scanning dirty cycles for profitable paths"
                 );
+            } else {
+                debug!(block, block_age_ms, "block complete — no dirty cycles to scan");
             }
             let eval_start = Instant::now();
             // Pure cycle-math time (excludes DB persist + Redis emit I/O below).
@@ -261,14 +275,13 @@ async fn main() -> Result<()> {
             if dirty > 0 {
                 info!(
                     block,
+                    block_age_ms,
                     dirty_cycles = dirty,
                     opps = found_this_block,
                     compute_us = compute_us as u64,
                     total_us,
                     "search done — finished scanning dirty cycles for profitable paths"
                 );
-            } else {
-                debug!(block, total_us, "block complete — no dirty cycles to scan");
             }
 
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
