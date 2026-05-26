@@ -1,7 +1,46 @@
 use crate::amm::{get_amount_out, u256_to_f64, VirtualPool};
 use crate::store::PoolStore;
-use crate::types::{Cycle, OppHop, Opportunity};
-use alloy::primitives::U256;
+use crate::types::{Cycle, OppHop, Opportunity, PoolState};
+use alloy::primitives::{Address, U256};
+use std::collections::HashMap;
+
+/// Read-only view of pool reserves: confirmed store plus an optional per-pool
+/// overlay of predicted (reserve0, reserve1) used for speculative evaluation.
+/// The overlay is consulted first; everything else falls back to the store, so
+/// the confirmed `PoolStore` is never mutated.
+pub struct ReserveView<'a> {
+    store: &'a PoolStore,
+    overrides: &'a HashMap<Address, (U256, U256)>,
+}
+
+impl<'a> ReserveView<'a> {
+    pub fn confirmed(store: &'a PoolStore) -> Self {
+        Self {
+            store,
+            overrides: EMPTY_OVERRIDES.get_or_init(HashMap::new),
+        }
+    }
+
+    pub fn with_overrides(
+        store: &'a PoolStore,
+        overrides: &'a HashMap<Address, (U256, U256)>,
+    ) -> Self {
+        Self { store, overrides }
+    }
+
+    /// Pool state with any overridden reserves applied.
+    fn get(&self, pair: &Address) -> Option<PoolState> {
+        let mut pool = self.store.get(pair)?;
+        if let Some(&(r0, r1)) = self.overrides.get(pair) {
+            pool.reserve0 = r0;
+            pool.reserve1 = r1;
+        }
+        Some(pool)
+    }
+}
+
+static EMPTY_OVERRIDES: std::sync::OnceLock<HashMap<Address, (U256, U256)>> =
+    std::sync::OnceLock::new();
 
 /// Parameters shared across all cycle evaluations.
 pub struct EvalParams {
@@ -18,9 +57,15 @@ pub struct EvalParams {
     pub gas_cost: f64,
 }
 
-/// Evaluate one cycle against current reserves. Returns an Opportunity if it clears
+/// Evaluate one cycle against the confirmed store. Returns an Opportunity if it clears
 /// the profit threshold after the loan fee and gas.
 pub fn evaluate(cycle: &Cycle, store: &PoolStore, p: &EvalParams) -> Option<Opportunity> {
+    evaluate_with_view(cycle, &ReserveView::confirmed(store), p)
+}
+
+/// Like `evaluate`, but reads reserves through a `ReserveView` so callers can supply
+/// predicted overrides without mutating the confirmed store.
+pub fn evaluate_with_view(cycle: &Cycle, view: &ReserveView, p: &EvalParams) -> Option<Opportunity> {
     if cycle.hops.is_empty() {
         return None;
     }
@@ -28,7 +73,7 @@ pub fn evaluate(cycle: &Cycle, store: &PoolStore, p: &EvalParams) -> Option<Oppo
     // 1. Compose the path into a single fee-less virtual pool (f64) to size the trade.
     let mut vp: Option<VirtualPool> = None;
     for hop in &cycle.hops {
-        let pool = store.get(&hop.pool)?;
+        let pool = view.get(&hop.pool)?;
         let (r_in, r_out) = pool.reserves_for(hop.token_in)?;
         let (ri, ro) = (u256_to_f64(r_in), u256_to_f64(r_out));
         if ri <= 0.0 || ro <= 0.0 {
@@ -52,7 +97,7 @@ pub fn evaluate(cycle: &Cycle, store: &PoolStore, p: &EvalParams) -> Option<Oppo
     // 3. Exact integer simulation across the real path (this is what the chain sees).
     let mut amount = amount_in;
     for hop in &cycle.hops {
-        let pool = store.get(&hop.pool)?;
+        let pool = view.get(&hop.pool)?;
         let (r_in, r_out) = pool.reserves_for(hop.token_in)?;
         amount = get_amount_out(amount, r_in, r_out, pool.fee_bps);
         if amount.is_zero() {
@@ -79,7 +124,7 @@ pub fn evaluate(cycle: &Cycle, store: &PoolStore, p: &EvalParams) -> Option<Oppo
         .hops
         .iter()
         .map(|h| {
-            let pool = store.get(&h.pool);
+            let pool = view.get(&h.pool);
             OppHop {
                 pool: h.pool,
                 dex: pool.as_ref().map(|p| p.dex.clone()).unwrap_or_default(),
@@ -93,7 +138,7 @@ pub fn evaluate(cycle: &Cycle, store: &PoolStore, p: &EvalParams) -> Option<Oppo
     let block = cycle
         .hops
         .iter()
-        .filter_map(|h| store.get(&h.pool).map(|p| p.block))
+        .filter_map(|h| view.get(&h.pool).map(|p| p.block))
         .max()
         .unwrap_or(0);
 

@@ -19,6 +19,11 @@ const UPDATE_CHANNEL: &str = "pool_updates";
 /// than reacting to every individual reserve update.
 const BLOCK_COMPLETE_CHANNEL: &str = "block_complete";
 
+/// Channel that PREDICTED (pre-mine) reserve updates from the mempool watcher
+/// are published to. Kept separate from `pool_updates` so consumers can opt in
+/// to speculative state without it polluting confirmed state.
+const PENDING_UPDATE_CHANNEL: &str = "pending_updates";
+
 /// Maximum number of pools batched into a single snapshot pipeline.
 const SNAPSHOT_CHUNK: usize = 500;
 
@@ -76,6 +81,7 @@ impl RedisSink {
         reserve0: U256,
         reserve1: U256,
         block: u64,
+        block_ts: u64,
     ) -> Result<()> {
         let mut conn = self.conn.clone();
 
@@ -95,16 +101,45 @@ impl RedisSink {
             )
             .await?;
 
+        // `block_ts` is the on-chain timestamp (s) of the block that produced this
+        // Sync, so the finder can log detection latency at the moment it reacts.
         let payload = serde_json::json!({
             "address": format!("{address:#x}"),
             "reserve0": reserve0,
             "reserve1": reserve1,
             "block": block,
+            "block_ts": block_ts,
         })
         .to_string();
 
         let _: () = conn.publish(UPDATE_CHANNEL, payload).await?;
 
+        Ok(())
+    }
+
+    /// Publish a PREDICTED reserve update for `address` (from a pending,
+    /// not-yet-mined swap) on the `pending_updates` channel, tagged
+    /// `predicted: true`. Pure pub/sub — does NOT mutate the confirmed
+    /// `pool:{addr}` hash, so it can never corrupt mined state.
+    pub async fn publish_pending_update(
+        &self,
+        address: Address,
+        reserve0: U256,
+        reserve1: U256,
+        block: u64,
+        tx_hash: alloy::primitives::B256,
+    ) -> Result<()> {
+        let mut conn = self.conn.clone();
+        let payload = serde_json::json!({
+            "address": format!("{address:#x}"),
+            "reserve0": reserve0.to_string(),
+            "reserve1": reserve1.to_string(),
+            "block": block,
+            "tx_hash": format!("{tx_hash:#x}"),
+            "predicted": true,
+        })
+        .to_string();
+        let _: () = conn.publish(PENDING_UPDATE_CHANNEL, payload).await?;
         Ok(())
     }
 

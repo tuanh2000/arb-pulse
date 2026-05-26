@@ -29,14 +29,18 @@ pub async fn load_snapshot(url: &str) -> Result<Vec<PoolState>> {
     Ok(pools)
 }
 
-/// Subscribe to both the reserve-update and block-complete channels on one
-/// connection (so publish order is preserved: a block's updates are delivered
-/// before its block_complete trigger). Caller drives `on_message`.
-pub async fn subscribe(url: &str) -> Result<redis::aio::PubSub> {
+/// Subscribe to the reserve-update and block-complete channels on one connection
+/// (so publish order is preserved: a block's updates are delivered before its
+/// block_complete trigger). When `pending_channel` is set (Phase 2 speculative
+/// mode) also subscribe to it. Caller drives `on_message`.
+pub async fn subscribe(url: &str, pending_channel: Option<&str>) -> Result<redis::aio::PubSub> {
     let client = redis::Client::open(url)?;
     let mut pubsub = client.get_async_pubsub().await?;
     pubsub.subscribe(UPDATE_CHANNEL).await?;
     pubsub.subscribe(BLOCK_COMPLETE_CHANNEL).await?;
+    if let Some(ch) = pending_channel {
+        pubsub.subscribe(ch).await?;
+    }
     Ok(pubsub)
 }
 

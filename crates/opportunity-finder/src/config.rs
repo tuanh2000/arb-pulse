@@ -30,6 +30,13 @@ pub struct FinderConfig {
     pub max_cycles: usize,
     #[serde(default = "default_channel")]
     pub output_channel: String,
+    /// Phase 2: enable consuming predicted reserves and emitting speculative opps.
+    #[serde(default)]
+    pub speculative_enabled: bool,
+    #[serde(default = "default_pending_updates_channel")]
+    pub pending_updates_channel: String,
+    #[serde(default = "default_speculative_channel")]
+    pub speculative_channel: String,
 }
 
 fn default_max_cycles() -> usize {
@@ -38,6 +45,14 @@ fn default_max_cycles() -> usize {
 
 fn default_channel() -> String {
     "opportunities".to_string()
+}
+
+fn default_pending_updates_channel() -> String {
+    "pending_updates".to_string()
+}
+
+fn default_speculative_channel() -> String {
+    "opportunities_speculative".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

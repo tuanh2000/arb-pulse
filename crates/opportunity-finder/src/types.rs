@@ -59,6 +59,24 @@ pub struct PoolUpdate {
     pub reserve0: String,
     pub reserve1: String,
     pub block: u64,
+    /// On-chain timestamp (s) of the block that produced this update. 0 = unknown.
+    #[serde(default)]
+    pub block_ts: u64,
+}
+
+/// Predicted reserve state for a pool after a pending mempool tx, published by the
+/// listener on `pending_updates` (Phase 2). Evaluated against confirmed state without
+/// mutating it.
+#[derive(Debug, Deserialize)]
+pub struct PendingUpdate {
+    pub address: String,
+    pub reserve0: String,
+    pub reserve1: String,
+    /// Block the prediction is anchored to; part of the wire contract but not used
+    /// in evaluation (speculative opps are not deduped per-block).
+    #[allow(dead_code)]
+    pub block: u64,
+    pub tx_hash: String,
 }
 
 /// A hop as reported in an emitted opportunity.

@@ -17,6 +17,15 @@ min_tvl_usd = 50.0
 host = "127.0.0.1"
 port = 3000
 
+# Mempool watcher (Phase 2, listener). Predicts reserve changes from PENDING
+# swap txs before they mine and publishes them on `channel` for the finder's
+# speculative path. DEFAULT OFF: public RPC nodes usually reject pending-tx
+# subscriptions, so this needs an owned node. The watcher degrades gracefully
+# (logs a warning and disables itself) if the node rejects the subscription.
+[mempool]
+enabled = false
+channel = "pending_updates"
+
 [[dexes]]
 name = "pulsex_v2"
 enabled = true
@@ -51,25 +60,33 @@ fee_bps = 17
 
 # Opportunity Finder (PathFinder, module #2) settings.
 [finder]
-# Base token to start/end every arbitrage cycle in. USDC from Ethereum keeps its
-# Ethereum address on PulseChain (forked state). VERIFY this is the pool token
-# the listener actually tracks before relying on it.
-token_in = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-token_in_decimals = 6
-# Max swaps per cycle (2 = USDC->X->USDC, 3 = USDC->X->Y->USDC, ...).
+# Base token to start/end every arbitrage cycle in. WPLS is the canonical
+# wrapped native token on PulseChain and has the deepest liquidity.
+token_in = "0xA1077a294dDE1B09bB078844df40758a5D0f9a27"
+token_in_decimals = 18
+# Max swaps per cycle (2 = WPLS->X->WPLS, 3 = WPLS->X->Y->WPLS, ...).
 max_hops = 3
-# Minimum NET profit (in token_in, human units) to emit an opportunity.
-min_profit = 0.05
-# Cap on trade size (token_in human units). 0 = unbounded (size = optimal x*).
-max_trade_size = 10000.0
+# Minimum NET profit (in WPLS, human units) to emit an opportunity.
+min_profit = 50000.0
+# Cap on trade size (WPLS human units). 0 = unbounded (size = optimal x*).
+max_trade_size = 50000000.0
 # Flash-loan fee in bps charged on the borrowed notional. 0 = PHUX / own capital.
 loan_fee_bps = 0
-# Rough gas cost per arb tx, expressed in token_in human units (placeholder).
-gas_cost = 0.5
+# Rough gas cost per arb tx, expressed in WPLS human units (placeholder).
+gas_cost = 10000.0
 # Safety cap on the number of structural cycles enumerated at startup.
 max_cycles = 200000
 # Redis pub/sub channel opportunities are published to (for the Sender).
 output_channel = "opportunities"
+# Phase 2 speculative mode. When true, the finder also consumes predicted
+# reserves from `pending_updates_channel` (published by the listener's mempool
+# watcher) and emits SPECULATIVE opportunities to `speculative_channel`. DEFAULT
+# OFF: requires the mempool watcher above AND a broadcaster that can act on
+# pre-mine opps (ordering/backrun strategy — not yet implemented). The confirmed
+# evaluate-on-update path is unaffected by this flag.
+speculative_enabled = false
+pending_updates_channel = "pending_updates"
+speculative_channel = "opportunities_speculative"
 
 # Transaction Broadcaster (Sender, module #3) settings.
 # The signing key is NOT stored here — set the PRIVATE_KEY env var.
@@ -97,6 +114,9 @@ min_profit_raw = "0"
 # Costs one extra RPC round-trip per opportunity. Set false to restore pure
 # fire-and-forget behavior.
 simulate = true
-# Max seconds to wait for a sent tx's receipt before abandoning the wait, so one
-# un-includable tx can't stall the single-in-flight broadcaster. ~45s ≈ 4 blocks.
-receipt_timeout_secs = 45
+# Blocks to wait for a sent tx to mine before fee-bumping and resending it at the
+# same nonce. With ~10s blocks, 1 means "bump if not mined in the next block".
+replace_after_blocks = 1
+# Max fee-bump resends per nonce before giving up (each bump is +12.5%, capped by
+# max_fee_gwei). The bumps escalate the fee until the tx lands or hits the cap.
+max_replacements = 5

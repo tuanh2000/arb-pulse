@@ -6,6 +6,7 @@ mod registry_client;
 mod sink;
 mod protocols;
 mod listener;
+mod mempool;
 
 use anyhow::Result;
 use registry_client::RegistryClient;
@@ -64,11 +65,33 @@ async fn main() -> Result<()> {
     let api_host = config.api.host.clone();
     let api_port = config.api.port;
 
-    tokio::try_join!(
+    // Phase 2 (additive, default OFF): spawn the mempool watcher only when the
+    // [mempool] section is present AND enabled. It shares the same Redis sink and
+    // pool set but publishes only to the separate `pending_updates` channel, so
+    // the confirmed Sync path is entirely unaffected whether on or off.
+    let mempool_handle = match &config.mempool {
+        Some(m) if m.enabled => {
+            info!(channel = %m.channel, "Mempool watcher enabled (predicted updates)");
+            let mp_store = store.clone();
+            let mp_sink = sink.clone();
+            let mp_config = config.clone();
+            Some(tokio::spawn(async move {
+                mempool::run(&mp_config, mp_store, mp_sink).await
+            }))
+        }
+        _ => None,
+    };
+
+    let core = tokio::try_join!(
         // Maintain state from WebSocket Sync events (no RPC polling in steady state).
         listener::start_ws_listener(&config, store, sink, pools),
         api::start(&api_host, api_port, api_store),
-    )?;
+    );
+
+    if let Some(h) = mempool_handle {
+        h.abort();
+    }
+    core?;
 
     Ok(())
 }

@@ -46,6 +46,25 @@ pub struct ApiConfig {
     pub port: u16,
 }
 
+/// Mempool watcher (Phase 2, additive). Its ABSENCE from config means disabled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MempoolConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_pending_channel")]
+    pub channel: String,
+}
+
+fn default_pending_channel() -> String {
+    "pending_updates".to_string()
+}
+
+impl Default for MempoolConfig {
+    fn default() -> Self {
+        Self { enabled: false, channel: default_pending_channel() }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub network: NetworkConfig,
@@ -53,6 +72,9 @@ pub struct AppConfig {
     pub registry: RegistryConfig,
     pub api: ApiConfig,
     pub dexes: Vec<DexConfig>,
+    /// Absent => mempool watcher disabled (default).
+    #[serde(default)]
+    pub mempool: Option<MempoolConfig>,
 }
 
 impl AppConfig {

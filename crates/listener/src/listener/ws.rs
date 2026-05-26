@@ -40,6 +40,11 @@ async fn run_inner(config: &AppConfig, store: &PoolStore, sink: &RedisSink) -> R
     // When we signal block N complete we pass N's timestamp, which we captured
     // one iteration ago (block N+1 triggers the signal for N).
     let mut prev_block_timestamp: u64 = 0;
+    // block number -> on-chain timestamp, populated from block heads. Used as a
+    // fallback to stamp Sync updates when the log itself lacks `block_timestamp`,
+    // so the finder can measure block-creation -> detection latency. Pruned to a
+    // recent window to stay bounded.
+    let mut block_ts_map: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
 
     tracing::info!("WebSocket state-change subscription active");
 
@@ -79,8 +84,15 @@ async fn run_inner(config: &AppConfig, store: &PoolStore, sink: &RedisSink) -> R
 
                 store.update_reserves(update.address, update.reserve0, update.reserve1, update.block);
 
+                // Prefer the timestamp the node attaches to the log; fall back to the
+                // header-derived map. 0 means unknown (finder then omits latency).
+                let block_ts = log
+                    .block_timestamp
+                    .or_else(|| block_ts_map.get(&update.block).copied())
+                    .unwrap_or(0);
+
                 if let Err(e) = sink
-                    .update_reserves(update.address, update.reserve0, update.reserve1, update.block)
+                    .update_reserves(update.address, update.reserve0, update.reserve1, update.block, block_ts)
                     .await
                 {
                     tracing::warn!(pair = %pair_addr, error = %e, "Failed to write reserve update to Redis");
@@ -128,6 +140,10 @@ async fn run_inner(config: &AppConfig, store: &PoolStore, sink: &RedisSink) -> R
                     last_completed = completed;
                 }
                 prev_block_timestamp = header.timestamp;
+                block_ts_map.insert(header.number, header.timestamp);
+                // Keep only a recent window so the map can't grow unbounded.
+                let cutoff = header.number.saturating_sub(300);
+                block_ts_map.retain(|&n, _| n >= cutoff);
             }
             _ = ticker.tick() => {
                 tracing::info!(

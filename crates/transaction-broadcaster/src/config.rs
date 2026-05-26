@@ -31,16 +31,19 @@ pub struct BroadcasterConfig {
     pub max_opportunity_age_blocks: u64,
     #[serde(default)]
     pub min_profit_raw: String,
-    /// Max seconds to wait for a sent tx's receipt before abandoning the wait.
-    /// Prevents one un-includable tx (e.g. a base-fee spike above `max_fee_gwei`)
-    /// from stalling the single-in-flight broadcaster indefinitely.
-    #[serde(default = "default_receipt_timeout")]
-    pub receipt_timeout_secs: u64,
     /// Pre-send `eth_call` simulation. When true (default), an opportunity whose
     /// tx would revert on-chain (fee-on-transfer token, stale reserves, etc.) is
     /// skipped before any gas is spent. Costs one extra RPC round-trip per opp.
     #[serde(default = "default_simulate")]
     pub simulate: bool,
+    /// Blocks to wait for a sent tx to mine before fee-bumping and resending it at
+    /// the same nonce. Stops one under-priced tx from jamming the nonce queue.
+    #[serde(default = "default_replace_after_blocks")]
+    pub replace_after_blocks: u64,
+    /// Max fee-bump resends per nonce before giving up (each bump is +12.5%,
+    /// capped by `max_fee_gwei`).
+    #[serde(default = "default_max_replacements")]
+    pub max_replacements: u32,
 }
 
 fn default_channel() -> String {
@@ -61,8 +64,11 @@ fn default_age() -> u64 {
 fn default_simulate() -> bool {
     true
 }
-fn default_receipt_timeout() -> u64 {
-    45
+fn default_replace_after_blocks() -> u64 {
+    1
+}
+fn default_max_replacements() -> u32 {
+    5
 }
 
 #[derive(Debug, Clone, Deserialize)]

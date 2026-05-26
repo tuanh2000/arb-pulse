@@ -8,19 +8,27 @@ mod source;
 mod store;
 mod types;
 
-use alloy::primitives::Address;
+use alloy::primitives::{Address, U256};
 use anyhow::Result;
 use emitter::Emitter;
-use finder::{evaluate, EvalParams};
+use finder::{evaluate, evaluate_with_view, EvalParams, ReserveView};
 use futures::StreamExt;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use store::PoolStore;
 use tracing::{debug, info, warn};
-use types::{Opportunity, PoolUpdate};
+use types::{Opportunity, PendingUpdate, PoolUpdate};
 
-/// Emit a structured info log for one discovered opportunity.
-fn log_opportunity(opp: &Opportunity, decimals: u8, db_id: Option<i64>, phase: &str) {
+/// Emit a structured info log for one discovered opportunity. `detect_latency_ms`
+/// is the lag from the block's on-chain creation to this detection (None = the
+/// update carried no block timestamp).
+fn log_opportunity(
+    opp: &Opportunity,
+    decimals: u8,
+    db_id: Option<i64>,
+    phase: &str,
+    detect_latency_ms: Option<u64>,
+) {
     let scale = 10f64.powi(decimals as i32);
     let size_in = amm::u256_to_f64(opp.amount_in) / scale;
     let path = opp
@@ -36,10 +44,37 @@ fn log_opportunity(opp: &Opportunity, decimals: u8, db_id: Option<i64>, phase: &
         size_in,
         hops = opp.hops.len(),
         block = opp.block,
+        detect_latency_ms = ?detect_latency_ms,
         db_id = ?db_id,
         path = %path,
         "opportunity found"
     );
+}
+
+/// Persist (if DB present), log, and emit a confirmed opportunity. Returns the db id.
+async fn handle_confirmed(
+    opp: &Opportunity,
+    db_pool: &Option<sqlx::PgPool>,
+    emitter: &Emitter,
+    decimals: u8,
+    phase: &str,
+    detect_latency_ms: Option<u64>,
+) {
+    let db_id = if let Some(pool) = db_pool {
+        match db::insert_opportunity(pool, opp).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                warn!(error = %e, "failed to persist opportunity to DB");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    log_opportunity(opp, decimals, db_id, phase, detect_latency_ms);
+    if let Err(e) = emitter.emit(opp, db_id).await {
+        warn!(error = %e, "failed to emit opportunity");
+    }
 }
 
 /// How often the live update loop logs an aggregate heartbeat.
@@ -125,19 +160,8 @@ async fn main() -> Result<()> {
     let mut emitted = 0usize;
     for cycle in &cycles {
         if let Some(opp) = evaluate(cycle, &store, &params) {
-            let db_id = if let Some(pool) = &db_pool {
-                match db::insert_opportunity(pool, &opp).await {
-                    Ok(id) => Some(id),
-                    Err(e) => {
-                        warn!(error = %e, "failed to persist opportunity to DB");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            log_opportunity(&opp, params.token_in_decimals, db_id, "initial");
-            emitter.emit(&opp, db_id).await?;
+            handle_confirmed(&opp, &db_pool, &emitter, params.token_in_decimals, "initial", None)
+                .await;
             emitted += 1;
         }
     }
@@ -150,22 +174,26 @@ async fn main() -> Result<()> {
         "Initial scan complete"
     );
 
-    // 4. Block-coherent evaluation. Reserve deltas on `pool_updates` keep the store
-    //    fresh and queue the touched cycles; the listener's `block_complete` ping
-    //    triggers a single evaluation pass over all cycles dirtied during that block.
-    //    Both channels share one connection, so a block's updates always arrive
-    //    before its trigger.
-    let mut pubsub = source::subscribe(&cfg.redis.url).await?;
+    // 4. Live evaluation. Each reserve delta on `pool_updates` is applied to the store
+    //    and the affected cycles are evaluated immediately (no waiting for the next
+    //    block header). `block_complete` no longer drives evaluation — it is kept only
+    //    for the latency log, the heartbeat, and pruning the dedup map.
+    let speculative = cfg.finder.speculative_enabled;
+    let pending_channel = speculative.then(|| cfg.finder.pending_updates_channel.clone());
+    let mut pubsub = source::subscribe(&cfg.redis.url, pending_channel.as_deref()).await?;
     let mut stream = pubsub.on_message();
-    info!("Listening for pool updates + per-block evaluation triggers...");
+    info!(
+        speculative,
+        "Listening for pool updates (evaluate-on-update)..."
+    );
 
     // Aggregate counters for the periodic heartbeat.
     let mut updates_processed: u64 = 0;
     let mut updates_ignored: u64 = 0;
     let mut opps_found: u64 = 0;
     let mut blocks_evaluated: u64 = 0;
-    // Cycle indices touched since the last block_complete; deduped across pools.
-    let mut dirty_cycles: HashSet<usize> = HashSet::new();
+    // cycle index -> last block at which it was emitted (per-block dedup).
+    let mut last_emitted: HashMap<usize, u64> = HashMap::new();
     let mut last_heartbeat = Instant::now();
 
     while let Some(msg) = stream.next().await {
@@ -178,7 +206,7 @@ async fn main() -> Result<()> {
             }
         };
 
-        // ── Data path: apply the reserve delta and queue affected cycles. ──
+        // ── Data path: apply the reserve delta and evaluate affected cycles now. ──
         if channel == source::UPDATE_CHANNEL {
             let update: PoolUpdate = match serde_json::from_str(&payload) {
                 Ok(u) => u,
@@ -198,19 +226,88 @@ async fn main() -> Result<()> {
             store.update_reserves(addr, r0, r1, update.block);
             updates_processed += 1;
 
-            match index.get(&addr) {
-                Some(cycle_idxs) => {
-                    for &i in cycle_idxs {
-                        dirty_cycles.insert(i);
-                    }
-                }
+            // Latency from the block's on-chain creation to this detection. Measured
+            // now (when we react to the update), not later after DB/emit I/O. None
+            // when the listener couldn't attach a block timestamp.
+            let detect_latency_ms = if update.block_ts > 0 {
+                let now_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                Some(now_ms.saturating_sub(update.block_ts * 1000))
+            } else {
+                None
+            };
+
+            let Some(cycle_idxs) = index.get(&addr) else {
                 // Reserve update for a pool that is not part of any cycle.
-                None => updates_ignored += 1,
+                updates_ignored += 1;
+                continue;
+            };
+
+            for &i in cycle_idxs {
+                if let Some(opp) = evaluate(&cycles[i], &store, &params) {
+                    // Per-(cycle, block) dedup: skip if already emitted this block.
+                    if last_emitted.get(&i) == Some(&update.block) {
+                        continue;
+                    }
+                    last_emitted.insert(i, update.block);
+                    opps_found += 1;
+                    handle_confirmed(
+                        &opp,
+                        &db_pool,
+                        &emitter,
+                        params.token_in_decimals,
+                        "live",
+                        detect_latency_ms,
+                    )
+                    .await;
+                }
             }
             continue;
         }
 
-        // ── Trigger path: evaluate every dirtied cycle once for this block. ──
+        // ── Speculative path: evaluate against confirmed state with this pool's
+        //    predicted reserves overridden (Phase 2; only when enabled). ──
+        if speculative && pending_channel.as_deref() == Some(channel.as_str()) {
+            let update: PendingUpdate = match serde_json::from_str(&payload) {
+                Ok(u) => u,
+                Err(e) => {
+                    warn!(error = %e, "failed to decode pending update");
+                    continue;
+                }
+            };
+            let Ok(addr) = update.address.parse::<Address>() else {
+                warn!(addr = %update.address, "invalid pool address in pending update");
+                continue;
+            };
+            let (Ok(r0), Ok(r1)) = (update.reserve0.parse(), update.reserve1.parse()) else {
+                warn!("invalid reserves in pending update");
+                continue;
+            };
+            let Some(cycle_idxs) = index.get(&addr) else {
+                continue;
+            };
+
+            let mut overrides: HashMap<Address, (U256, U256)> = HashMap::with_capacity(1);
+            overrides.insert(addr, (r0, r1));
+            let view = ReserveView::with_overrides(&store, &overrides);
+
+            for &i in cycle_idxs {
+                if let Some(opp) = evaluate_with_view(&cycles[i], &view, &params) {
+                    log_opportunity(&opp, params.token_in_decimals, None, "speculative", None);
+                    if let Err(e) = emitter
+                        .emit_speculative(&cfg.finder.speculative_channel, &opp, &update.tx_hash)
+                        .await
+                    {
+                        warn!(error = %e, "failed to emit speculative opportunity");
+                    }
+                }
+            }
+            continue;
+        }
+
+        // ── Trigger path: latency log, heartbeat, dedup pruning (no evaluation). ──
         if channel == source::BLOCK_COMPLETE_CHANNEL {
             let parsed = serde_json::from_str::<serde_json::Value>(&payload).ok();
             let block = parsed.as_ref().and_then(|v| v["block"].as_u64()).unwrap_or(0);
@@ -227,62 +324,13 @@ async fn main() -> Result<()> {
             } else {
                 0
             };
+            debug!(block, block_age_ms, "block complete");
 
-            let dirty = dirty_cycles.len();
-            if dirty > 0 {
-                info!(
-                    block,
-                    block_age_ms,
-                    dirty_cycles = dirty,
-                    "search start — scanning dirty cycles for profitable paths"
-                );
-            } else {
-                debug!(block, block_age_ms, "block complete — no dirty cycles to scan");
+            // Drop dedup entries for blocks older than the one just completed.
+            if block > 0 {
+                last_emitted.retain(|_, &mut b| b >= block);
             }
-            let eval_start = Instant::now();
-            // Pure cycle-math time (excludes DB persist + Redis emit I/O below).
-            let mut compute_us: u128 = 0;
-            let mut found_this_block: u64 = 0;
-            for &i in &dirty_cycles {
-                let t = Instant::now();
-                let maybe_opp = evaluate(&cycles[i], &store, &params);
-                compute_us += t.elapsed().as_micros();
-                if let Some(opp) = maybe_opp {
-                    let db_id = if let Some(pool) = &db_pool {
-                        match db::insert_opportunity(pool, &opp).await {
-                            Ok(id) => Some(id),
-                            Err(e) => {
-                                warn!(error = %e, "failed to persist opportunity to DB");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    opps_found += 1;
-                    found_this_block += 1;
-                    log_opportunity(&opp, params.token_in_decimals, db_id, "live");
-                    if let Err(e) = emitter.emit(&opp, db_id).await {
-                        warn!(error = %e, "failed to emit opportunity");
-                    }
-                }
-            }
-            dirty_cycles.clear();
             blocks_evaluated += 1;
-            // Per-block timing so we can see how long the finder takes per block.
-            // `compute_us` is the cycle math alone; `total_us` includes persist+emit.
-            let total_us = eval_start.elapsed().as_micros() as u64;
-            if dirty > 0 {
-                info!(
-                    block,
-                    block_age_ms,
-                    dirty_cycles = dirty,
-                    opps = found_this_block,
-                    compute_us = compute_us as u64,
-                    total_us,
-                    "search done — finished scanning dirty cycles for profitable paths"
-                );
-            }
 
             if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
                 info!(

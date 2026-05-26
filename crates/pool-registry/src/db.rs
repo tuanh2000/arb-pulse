@@ -128,24 +128,34 @@ pub async fn update_pool_state(
     Ok(())
 }
 
-/// Return all pools where tvl >= min_tvl.
+/// Return all pools where tvl >= min_tvl, EXCLUDING any pool whose token0 or
+/// token1 is flagged fee-on-transfer/gas-heavy (`token_metadata.is_fot`) OR
+/// whose `has_meme_token` flag is set. This is the single choke point: flagged
+/// pools never reach the listener, so they can't enter a cycle or the broadcaster.
 pub async fn get_pools_by_min_tvl(
     pool: &PgPool,
     min_tvl: f64,
     include_null: bool,
 ) -> Result<Vec<PoolRecord>> {
+    // Subquery: exclude pools where either token is fee-on-transfer.
+    const FOT_EXCLUDE: &str = "NOT EXISTS (\
+        SELECT 1 FROM token_metadata m \
+        WHERE m.is_fot AND m.token_address IN (lower(token0), lower(token1)))";
+    // Direct column check: exclude pools containing a meme token.
+    const MEME_EXCLUDE: &str = "NOT has_meme_token";
+
     let rows = if include_null {
         sqlx::query_as::<_, PoolRecord>(
-            "SELECT pool_address, protocol, token0, token1, token0_decimals, token1_decimals, tvl, updated_at
-             FROM pools WHERE tvl >= $1 OR tvl IS NULL ORDER BY tvl DESC NULLS LAST"
+            &format!("SELECT pool_address, protocol, token0, token1, token0_decimals, token1_decimals, tvl, updated_at
+             FROM pools WHERE (tvl >= $1 OR tvl IS NULL) AND {FOT_EXCLUDE} AND {MEME_EXCLUDE} ORDER BY tvl DESC NULLS LAST")
         )
         .bind(min_tvl)
         .fetch_all(pool)
         .await?
     } else {
         sqlx::query_as::<_, PoolRecord>(
-            "SELECT pool_address, protocol, token0, token1, token0_decimals, token1_decimals, tvl, updated_at
-             FROM pools WHERE tvl >= $1 ORDER BY tvl DESC"
+            &format!("SELECT pool_address, protocol, token0, token1, token0_decimals, token1_decimals, tvl, updated_at
+             FROM pools WHERE tvl >= $1 AND {FOT_EXCLUDE} AND {MEME_EXCLUDE} ORDER BY tvl DESC")
         )
         .bind(min_tvl)
         .fetch_all(pool)
@@ -473,6 +483,84 @@ pub async fn count_token_metadata(pool: &PgPool) -> Result<(i64, i64)> {
     Ok((referenced, resolved))
 }
 
+/// Flag a set of token addresses as fee-on-transfer (`is_fot = TRUE`). Used to
+/// apply the config denylist at startup. Inserts a metadata row if the token has
+/// none yet. Addresses are lowercased to match the table's convention.
+pub async fn flag_tokens_fot(pool: &PgPool, addrs: &[String]) -> Result<u64> {
+    if addrs.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for a in addrs {
+        n += sqlx::query(
+            "INSERT INTO token_metadata (token_address, is_fot, screened_at)
+             VALUES (lower($1), TRUE, NOW())
+             ON CONFLICT (token_address) DO UPDATE
+             SET is_fot = TRUE, screened_at = NOW()",
+        )
+        .bind(a)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(n)
+}
+
+/// One token to screen for fee-on-transfer, with a pool that pairs it against a
+/// known base token (whose balance storage slot we can override in `eth_call`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ScreenCandidate {
+    pub token: String,
+    pub pool_address: String,
+    pub base: String,
+}
+
+/// Unscreened tokens (no `screened_at`) that have a pool pairing them with exactly
+/// one of `bases`. One row per token (the first such pool). Bases are lowercase hex.
+pub async fn get_unscreened_base_pools(
+    pool: &PgPool,
+    bases: &[String],
+    limit: i64,
+) -> Result<Vec<ScreenCandidate>> {
+    let rows = sqlx::query_as::<_, ScreenCandidate>(
+        "SELECT DISTINCT ON (token) token, pool_address, base FROM (
+             SELECT lower(CASE WHEN lower(token0) = ANY($1) THEN token1 ELSE token0 END) AS token,
+                    pool_address,
+                    lower(CASE WHEN lower(token0) = ANY($1) THEN token0 ELSE token1 END) AS base
+             FROM pools
+             WHERE ((lower(token0) = ANY($1)) <> (lower(token1) = ANY($1)))
+               AND token0 IS NOT NULL
+         ) c
+         WHERE NOT EXISTS (
+             SELECT 1 FROM token_metadata m
+             WHERE m.token_address = c.token AND m.screened_at IS NOT NULL
+         )
+         LIMIT $2",
+    )
+    .bind(bases)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Record a screening result: set `is_fot` and `screened_at` for one token.
+pub async fn mark_token_screened(pool: &PgPool, token: &str, is_fot: bool) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO token_metadata (token_address, is_fot, screened_at)
+         VALUES (lower($1), $2, NOW())
+         ON CONFLICT (token_address) DO UPDATE
+         SET is_fot = EXCLUDED.is_fot, screened_at = NOW()",
+    )
+    .bind(token)
+    .bind(is_fot)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Read token metadata, newest first, up to `limit`.
 pub async fn list_token_metadata(pool: &PgPool, limit: i64) -> Result<Vec<TokenMetadataRecord>> {
     let rows = sqlx::query_as::<_, TokenMetadataRecord>(
@@ -483,6 +571,117 @@ pub async fn list_token_metadata(pool: &PgPool, limit: i64) -> Result<Vec<TokenM
     .fetch_all(pool)
     .await?;
     Ok(rows)
+}
+
+// ── meme_screener ───────────────────────────────────────────────────────────────
+
+/// A token that has metadata resolved but has not yet been classified for meme
+/// status. Fed to the meme screener for keyword-based classification.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PendingMemeToken {
+    pub token_address: String,
+    pub symbol: Option<String>,
+    pub name: Option<String>,
+}
+
+/// Tokens that have a symbol or name in `token_metadata` but whose
+/// `meme_screened_at` is NULL (not yet classified). Ordered by address for
+/// stable batching so repeated runs make forward progress.
+pub async fn get_tokens_pending_meme_classification(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<PendingMemeToken>> {
+    let rows = sqlx::query_as::<_, PendingMemeToken>(
+        "SELECT token_address, symbol, name FROM token_metadata
+         WHERE meme_screened_at IS NULL
+           AND (symbol IS NOT NULL OR name IS NOT NULL)
+         ORDER BY token_address
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Record a meme classification result for one token. If the token is flagged,
+/// also sets `has_meme_token = TRUE` on every pool that contains it. Both
+/// writes happen in a single transaction so they are always consistent.
+pub async fn mark_token_meme(pool: &PgPool, token: &str, is_meme: bool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO token_metadata (token_address, is_meme, meme_screened_at)
+         VALUES (lower($1), $2, NOW())
+         ON CONFLICT (token_address) DO UPDATE
+         SET is_meme = EXCLUDED.is_meme, meme_screened_at = NOW()",
+    )
+    .bind(token)
+    .bind(is_meme)
+    .execute(&mut *tx)
+    .await?;
+
+    if is_meme {
+        sqlx::query(
+            "UPDATE pools SET has_meme_token = TRUE
+             WHERE NOT has_meme_token
+               AND (lower(token0) = lower($1) OR lower(token1) = lower($1))",
+        )
+        .bind(token)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Sync `has_meme_token` on the pools table. Sets the flag TRUE for any pool
+/// where either token is a meme coin but the pool flag is stale (e.g. pool
+/// token identity was set after the screener ran). Called after each screener
+/// batch to converge on correct state without re-classifying every token.
+pub async fn sync_pool_meme_flags(pool: &PgPool) -> Result<u64> {
+    let n = sqlx::query(
+        "UPDATE pools
+         SET has_meme_token = TRUE
+         WHERE NOT has_meme_token
+           AND token0 IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM token_metadata m
+             WHERE m.is_meme
+               AND m.token_address IN (lower(token0), lower(token1))
+           )",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n)
+}
+
+/// Flag a set of token addresses as meme coins (from config denylist). Inserts
+/// a metadata row if none exists. Also propagates to affected pools. Addresses
+/// are lowercased to match the table's convention.
+pub async fn flag_tokens_meme(pool: &PgPool, addrs: &[String]) -> Result<u64> {
+    if addrs.is_empty() {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await?;
+    let mut n = 0u64;
+    for a in addrs {
+        n += sqlx::query(
+            "INSERT INTO token_metadata (token_address, is_meme, meme_screened_at)
+             VALUES (lower($1), TRUE, NOW())
+             ON CONFLICT (token_address) DO UPDATE
+             SET is_meme = TRUE, meme_screened_at = NOW()",
+        )
+        .bind(a)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    }
+    tx.commit().await?;
+    // Propagate to pools outside the per-row transaction.
+    sync_pool_meme_flags(pool).await?;
+    Ok(n)
 }
 
 /// Look up prices for a specific set of token addresses.

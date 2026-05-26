@@ -21,9 +21,32 @@ impl Emitter {
         if let (Some(id), Some(obj)) = (db_id, json.as_object_mut()) {
             obj.insert("db_id".to_string(), serde_json::Value::Number(id.into()));
         }
+        self.publish(&self.channel, json).await
+    }
+
+    /// Emit a speculative opportunity (Phase 2) to `channel`, tagged with the trigger
+    /// tx and a `speculative: true` marker on top of the standard Opportunity JSON.
+    pub async fn emit_speculative(
+        &self,
+        channel: &str,
+        opp: &Opportunity,
+        trigger_tx: &str,
+    ) -> Result<()> {
+        let mut json = opp.to_json();
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("speculative".to_string(), serde_json::Value::Bool(true));
+            obj.insert(
+                "trigger_tx".to_string(),
+                serde_json::Value::String(trigger_tx.to_string()),
+            );
+        }
+        self.publish(channel, json).await
+    }
+
+    async fn publish(&self, channel: &str, json: serde_json::Value) -> Result<()> {
         let payload = json.to_string();
         let mut conn = self.conn.clone();
-        let _: () = conn.publish(&self.channel, payload).await?;
+        let _: () = conn.publish(channel, payload).await?;
         Ok(())
     }
 }

@@ -2,6 +2,8 @@ mod api;
 mod chain_seeder;
 mod config;
 mod db;
+mod fot_screener;
+mod meme_screener;
 mod price;
 mod price_updater;
 mod reserve_fetcher;
@@ -150,6 +152,33 @@ async fn main() -> Result<()> {
     db::run_migrations(&db_pool).await?;
     tracing::info!("Database migrations applied");
 
+    // 4b. Apply the config token denylist (fee-on-transfer / gas-heavy / scam).
+    //     Flagged tokens' pools are excluded from /pools, so they never reach the
+    //     listener, finder, or broadcaster. Runs in every mode (cheap).
+    if !cfg.filter.denylist.is_empty() {
+        match db::flag_tokens_fot(&db_pool, &cfg.filter.denylist).await {
+            Ok(n) => tracing::info!(
+                denylisted = cfg.filter.denylist.len(),
+                rows = n,
+                "Applied token denylist (is_fot)"
+            ),
+            Err(e) => tracing::warn!(error = %e, "Failed to apply token denylist"),
+        }
+    }
+
+    // 4c. Apply the meme-coin denylist from config. These addresses are hard-flagged
+    //     as meme regardless of keywords; their pools are excluded from /pools.
+    if !cfg.meme_screener.denylist.is_empty() {
+        match db::flag_tokens_meme(&db_pool, &cfg.meme_screener.denylist).await {
+            Ok(n) => tracing::info!(
+                denylisted = cfg.meme_screener.denylist.len(),
+                rows = n,
+                "Applied meme token denylist (is_meme)"
+            ),
+            Err(e) => tracing::warn!(error = %e, "Failed to apply meme token denylist"),
+        }
+    }
+
     // 5. Seed pools table from chain (enumerates pair addresses via Multicall3 for
     //    every enabled DEX factory). Runs on every startup — inserts are idempotent
     //    (ON CONFLICT DO NOTHING), so newly-enabled factories get picked up without
@@ -226,6 +255,32 @@ async fn main() -> Result<()> {
         let idle = cfg.worker.idle_sleep_secs;
         tokio::spawn(async move {
             token_metadata::run(pool_clone, rpc_url, batch_size, idle).await;
+        });
+    }
+
+    // 8b. FOT SCREENER — auto-detect fee-on-transfer / gas-heavy tokens on-chain
+    //     (via eth_call state overrides) and flag them so their pools drop from
+    //     /pools. Default-OFF: only spawned when [fot_screener].enabled is true.
+    //     Runs alongside metadata population (Metadata/All modes).
+    if mode.runs_metadata() && cfg.fot_screener.enabled {
+        let pool_clone = db_pool.clone();
+        let rpc_url = cfg.network.rpc_http.clone();
+        let screener_cfg = cfg.fot_screener.clone();
+        tokio::spawn(async move {
+            fot_screener::run(pool_clone, rpc_url, screener_cfg).await;
+        });
+    }
+
+    // 8c. MEME SCREENER — classify tokens as meme coins by keyword matching
+    //     against their symbol / name (no RPC needed). Flags their pools via
+    //     `has_meme_token` so they are excluded from /pools. Default-OFF.
+    //     Runs alongside metadata population (Metadata/All modes) since it
+    //     depends on token_metadata rows being present.
+    if mode.runs_metadata() && cfg.meme_screener.enabled {
+        let pool_clone = db_pool.clone();
+        let screener_cfg = cfg.meme_screener.clone();
+        tokio::spawn(async move {
+            meme_screener::run(pool_clone, screener_cfg).await;
         });
     }
 

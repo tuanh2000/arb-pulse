@@ -50,6 +50,13 @@ min_anchor_liquidity_usd = 100.0
 
 [filter]
 min_tvl_usd = 200.0
+# Hard-excluded tokens (fee-on-transfer / gas-heavy / scam). Any pool containing
+# one is dropped from /pools, so it never reaches the listener, finder, or
+# broadcaster. Seeded into token_metadata.is_fot at startup; the FoT screener
+# adds more automatically. Lowercase addresses.
+denylist = [
+    "0x37645963aece8c5beb947da5621362c9f7db5a60",
+]
 
 [[filter.anchor_tokens]]
 address = "0xA1077a294dDE1B09bB078844df40758a5D0f9a27"
@@ -91,3 +98,43 @@ hardcoded_price_usd = 1.0
 address = "0xefD766cCb38EaF1dfd701853BFCe31359239F305"
 symbol = "DAI"
 hardcoded_price_usd = 1.0
+
+# Meme-coin screener. When enabled, classifies every token whose symbol or name
+# contains any of the configured keywords as a meme coin (is_meme = TRUE), and
+# sets has_meme_token = TRUE on every pool containing it. Those pools are then
+# excluded from /pools — same exclusion the FoT screener uses but keyword-based,
+# no RPC calls required. The denylist hard-flags specific addresses at startup.
+[meme_screener]
+enabled = true
+batch_size = 500
+interval_secs = 60
+keywords = [
+    "DOGE", "DOGG", "SHIB", "SHIBA", "PEPE", "BABY", "MOON", "INU",
+    "FLOKI", "MEME", "WOJAK", "BONK", "CHAD", "SNEK", "ELON", "HAMSTER",
+]
+denylist = []
+
+# Fee-on-transfer / gas-heavy token screener. When enabled, probes each token
+# (paired with a base) via an eth_call state-override and flags reflection / tax /
+# hook tokens as is_fot, so their pools are dropped from /pools — same exclusion
+# the denylist uses, but automatic. DEFAULT OFF. Enable ONLY after setting a
+# self_test below (a known-CLEAN token) so a wrong balance_slot can't mis-flag
+# good tokens — the screener self-disables if the self-test doesn't verify.
+[fot_screener]
+enabled = true
+gas_threshold = 400000
+batch_size = 200
+interval_secs = 300
+
+# Base tokens the detector is funded with. balance_slot = the storage slot index
+# of the token's `balanceOf` mapping (WPLS is WETH9-style → slot 3).
+[[fot_screener.bases]]
+address = "0xA1077a294dDE1B09bB078844df40758a5D0f9a27"
+balance_slot = 3
+
+# Known-CLEAN major token + its base pool. If this doesn't verify as clean at
+# startup, the screener disables itself (guards against a wrong balance_slot).
+[fot_screener.self_test]
+token = "0x95B303987A60C71504D99Aa1b13B4DA07b0790ab"  # PLSX
+pool  = "0x149b2c629e652f2e89e11cd57e5d4d77ee166f9f"  # PLSX/WPLS V2 pair
+base  = "0xA1077a294dDE1B09bB078844df40758a5D0f9a27"  # WPLS

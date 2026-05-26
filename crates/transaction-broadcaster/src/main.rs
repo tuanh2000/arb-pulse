@@ -2,6 +2,7 @@ mod abi;
 mod broadcaster;
 mod config;
 mod db;
+mod nonce;
 mod types;
 
 use alloy::network::EthereumWallet;
@@ -10,6 +11,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use nonce::NonceManager;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -97,17 +99,37 @@ async fn main() -> Result<()> {
         tokio::spawn(async move { track_tip(p, tip).await });
     }
 
+    // Nonce manager seeded from the chain's mined nonce. Starting at the mined
+    // (not pending) count lets fresh, properly-priced txs replace any stuck txs
+    // left in the mempool, so the broadcaster self-heals from a nonce jam.
+    let start_nonce = provider.get_transaction_count(sender_addr).await.unwrap_or(0);
+    let nm = NonceManager::new(start_nonce);
+    info!(start_nonce, "Nonce manager initialized");
+
     // ── Stage 1→2 channel: simulation tasks → send loop ─────────────────────
     let (ready_tx, ready_rx) = mpsc::channel::<ReadyToSend>(SEND_QUEUE_CAP);
 
-    // ── Stage 2: sequential send loop + background receipt tasks ────────────
+    // ── Nonce monitor: confirms / fee-bumps / replaces in-flight txs ─────────
     {
         let p = provider.clone();
         let cfg_b = cfg.broadcaster.clone();
         let db = db_pool.clone();
         let tip = Arc::clone(&current_tip);
+        let nm2 = nm.clone();
         tokio::spawn(async move {
-            send_loop(p, cfg_b, contract, chain_id, tip, db, ready_rx).await;
+            nonce::run_monitor(p, cfg_b, contract, chain_id, sender_addr, nm2, tip, db).await;
+        });
+    }
+
+    // ── Stage 2: sequential send loop ────────────────────────────────────────
+    {
+        let p = provider.clone();
+        let cfg_b = cfg.broadcaster.clone();
+        let db = db_pool.clone();
+        let tip = Arc::clone(&current_tip);
+        let nm2 = nm.clone();
+        tokio::spawn(async move {
+            send_loop(p, cfg_b, contract, chain_id, sender_addr, tip, db, nm2, ready_rx).await;
         });
     }
 
@@ -193,19 +215,24 @@ async fn main() -> Result<()> {
 }
 
 /// Stage 2: drain the ready-to-send channel one opportunity at a time.
-/// Sends are sequential (single private key / nonce). Receipt polling is
-/// offloaded to background tasks so this loop is never blocked on inclusion.
+/// Sends are sequential (single private key). Each tx is assigned an explicit
+/// nonce from the `NonceManager`; the nonce monitor handles confirmation and
+/// fee-bumps, so this loop is never blocked on inclusion.
+#[allow(clippy::too_many_arguments)]
 async fn send_loop<P>(
     provider: P,
     cfg: config::BroadcasterConfig,
     contract: Address,
     chain_id: u64,
+    sender: Address,
     tip: Arc<AtomicU64>,
     db: Option<PgPool>,
+    nm: NonceManager,
     mut rx: mpsc::Receiver<ReadyToSend>,
 ) where
     P: Provider + Clone + Send + Sync + 'static,
 {
+    let cap = (cfg.max_fee_gwei * 1e9) as u128;
     while let Some(ready) = rx.recv().await {
         // Second staleness gate — the opp may have aged while waiting in the
         // simulation queue.
@@ -236,37 +263,65 @@ async fn send_loop<P>(
             None
         };
 
-        match broadcaster::submit(&provider, &cfg, contract, chain_id, ready.data).await {
-            Ok(tx_hash) => {
+        let fees = match broadcaster::compute_fees(&provider, &cfg).await {
+            Ok(f) => f,
+            Err(e) => {
+                let chain = format!("{e:#}");
+                error!(error = %chain, "fee computation failed");
+                if let (Some(pool), Some(id)) = (&db, arb_id) {
+                    let _ = db::update_arb_tx_failed(pool, id, "failed", &chain).await;
+                }
+                continue;
+            }
+        };
+
+        let nonce = nm.peek();
+        match broadcaster::send_replacing(
+            &provider,
+            contract,
+            chain_id,
+            nonce,
+            fees,
+            cfg.gas_limit,
+            cap,
+            cfg.max_replacements,
+            ready.data.clone(),
+        )
+        .await
+        {
+            Ok((tx_hash, used_fees)) => {
                 info!(
                     tx = %tx_hash,
+                    nonce,
                     hops = ready.opp.hops.len(),
                     profit = ready.opp.net_profit_token_in,
                     opp_block = ready.opp.block,
                     "broadcast arb tx"
                 );
-
+                nm.commit(nonce, tx_hash, ready.data, used_fees, current, arb_id);
                 if let (Some(pool), Some(id)) = (&db, arb_id) {
                     let hash_str = format!("{tx_hash:?}");
                     if let Err(e) = db::update_arb_tx_sent(pool, id, &hash_str).await {
                         warn!(error = %e, "db: update to 'sent' failed");
                     }
                 }
-
-                // Receipt monitoring runs in the background — send loop
-                // immediately processes the next opportunity.
-                let p2 = provider.clone();
-                let db2 = db.clone();
-                let timeout = cfg.receipt_timeout_secs;
-                tokio::spawn(async move {
-                    broadcaster::poll_receipt(p2, tx_hash, timeout, db2, arb_id).await;
-                });
             }
             Err(e) => {
-                error!(error = %e, "send_transaction failed");
+                // `{:#}` prints the full anyhow cause chain on one line — the bare
+                // Display only shows the top context ("send_transaction").
+                let err_chain = format!("{e:#}");
+                if broadcaster::is_nonce_too_low(&err_chain) {
+                    // Our nonce is behind the chain — resync and drop this (stale) opp.
+                    if let Ok(mined) = provider.get_transaction_count(sender).await {
+                        nm.resync(mined);
+                    }
+                    warn!(nonce, error = %err_chain, "send rejected (nonce too low) — resynced; dropping opp");
+                } else {
+                    error!(nonce, error = %err_chain, "send_transaction failed");
+                }
                 if let (Some(pool), Some(id)) = (&db, arb_id) {
                     if let Err(db_err) =
-                        db::update_arb_tx_failed(pool, id, "failed", &e.to_string()).await
+                        db::update_arb_tx_failed(pool, id, "failed", &err_chain).await
                     {
                         warn!(error = %db_err, "db: update to 'failed' failed");
                     }
