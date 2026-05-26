@@ -1,0 +1,13 @@
+[package]
+name = "arb-metrics"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "arb_metrics"
+path = "src/lib.rs"
+
+[dependencies]
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+tracing = "0.1"

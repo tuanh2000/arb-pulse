@@ -98,6 +98,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    arb_metrics::init(arb_metrics::ports::POOL_REGISTRY);
+
     // 2. Load config + resolve run mode + API port
     let mode = Mode::from_args_and_env()?;
     let cfg = config::AppConfig::load()?;
@@ -203,12 +205,15 @@ async fn main() -> Result<()> {
             }
         }
 
-    // Fill static token identity (token0/token1/decimals) for any pools missing it,
-    // so the price oracle can identify anchor pools immediately after a fresh seed
-    // instead of waiting for the TVL worker's slow round-robin.
-    if let Err(e) = chain_seeder::populate_tokens(&db_pool, &cfg).await {
-        tracing::warn!(error = %e, "Seed token-fill failed — TVL worker will fill lazily");
-    }
+    // Fill static token identity (token0/token1/decimals) in the background so
+    // the API starts immediately. TVL worker fills lazily anyway if this is skipped.
+    let _fill_pool = db_pool.clone();
+    let _fill_cfg = cfg.clone();
+    tokio::spawn(async move {
+        if let Err(e) = chain_seeder::populate_tokens(&_fill_pool, &_fill_cfg).await {
+            tracing::warn!(error = %e, "Seed token-fill failed — TVL worker will fill lazily");
+        }
+    });
     }
 
     // 6. PRICE MODE — initial on-chain oracle pass + periodic refresh.
@@ -281,6 +286,26 @@ async fn main() -> Result<()> {
         let screener_cfg = cfg.meme_screener.clone();
         tokio::spawn(async move {
             meme_screener::run(pool_clone, screener_cfg).await;
+        });
+    }
+
+    // 8d. METRICS — periodically publish pool/token counts as Prometheus gauges
+    //     so the dashboard sees registry coverage without hitting the DB itself.
+    {
+        let metrics_pool = db_pool.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                ticker.tick().await;
+                if let Ok((total, with_tvl)) = db::count_pools(&metrics_pool).await {
+                    metrics::gauge!("registry_pools_total").set(total as f64);
+                    metrics::gauge!("registry_pools_with_tvl").set(with_tvl as f64);
+                }
+                if let Ok((referenced, resolved)) = db::count_token_metadata(&metrics_pool).await {
+                    metrics::gauge!("registry_tokens_resolved").set(resolved as f64);
+                    metrics::gauge!("registry_tokens_pending").set((referenced - resolved) as f64);
+                }
+            }
         });
     }
 

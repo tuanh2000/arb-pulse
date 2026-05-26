@@ -1,5 +1,5 @@
 [database]
-url = "postgresql://arbpulse:arbpulse@localhost:5432/arbpulse"
+url = "postgresql://harry:harry@harryserver:5432/arb_pulse"
 
 [network]
 rpc_http = "https://pulsechain-rpc.publicnode.com"
@@ -7,7 +7,7 @@ rpc_ws = "wss://pulsechain-rpc.publicnode.com"
 chain_id = 369
 
 [redis]
-url = "redis://127.0.0.1:6379"
+url = "redis://harryserver:6379"
 
 [registry]
 url = "http://127.0.0.1:3001"
@@ -60,20 +60,19 @@ fee_bps = 17
 
 # Opportunity Finder (PathFinder, module #2) settings.
 [finder]
-# Base token to start/end every arbitrage cycle in. WPLS is the canonical
-# wrapped native token on PulseChain and has the deepest liquidity.
-token_in = "0xA1077a294dDE1B09bB078844df40758a5D0f9a27"
-token_in_decimals = 18
-# Max swaps per cycle (2 = WPLS->X->WPLS, 3 = WPLS->X->Y->WPLS, ...).
-max_hops = 3
-# Minimum NET profit (in WPLS, human units) to emit an opportunity.
-min_profit = 50000.0
-# Cap on trade size (WPLS human units). 0 = unbounded (size = optimal x*).
-max_trade_size = 50000000.0
+# Base token to start/end every arbitrage cycle in. USDC on PulseChain.
+token_in = "0x15D38573d2feeb82e7ad5187aB8c1D52810B1f07"
+token_in_decimals = 6
+# Max swaps per cycle (2 = USDC->X->USDC, 3 = USDC->X->Y->USDC, ...).
+max_hops = 4
+# Minimum NET profit (in USDC, human units) to emit an opportunity.
+min_profit = 0.1
+# Cap on trade size (USDC human units). 0 = unbounded (size = optimal x*).
+max_trade_size = 50000.0
 # Flash-loan fee in bps charged on the borrowed notional. 0 = PHUX / own capital.
 loan_fee_bps = 0
-# Rough gas cost per arb tx, expressed in WPLS human units (placeholder).
-gas_cost = 10000.0
+# Rough gas cost per arb tx, expressed in USDC human units.
+gas_cost = 10000
 # Safety cap on the number of structural cycles enumerated at startup.
 max_cycles = 200000
 # Redis pub/sub channel opportunities are published to (for the Sender).

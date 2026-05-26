@@ -116,6 +116,8 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
+    arb_metrics::init(arb_metrics::ports::ORCHESTRATOR);
+
     info!(root = %root.display(), bin_dir = %bin_dir.display(), "Orchestrator starting");
 
     // Load PRIVATE_KEY (broadcater needs it at spawn time).
@@ -135,6 +137,22 @@ async fn main() -> Result<()> {
 
     // Check infra (postgres + redis) before starting any Rust service.
     check_infra(&db_url).await?;
+
+    // Publish infra liveness as gauges every 10s so the health dashboard reflects
+    // postgres/redis availability even when no service is actively using them.
+    {
+        let infra_db = Arc::clone(&db);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                ticker.tick().await;
+                let pg_up = sqlx::query("SELECT 1").execute(infra_db.as_ref()).await.is_ok();
+                metrics::gauge!("infra_postgres_up").set(if pg_up { 1.0 } else { 0.0 });
+                let redis_up = tokio::net::TcpStream::connect("127.0.0.1:6379").await.is_ok();
+                metrics::gauge!("infra_redis_up").set(if redis_up { 1.0 } else { 0.0 });
+            }
+        });
+    }
 
     // Build a watch channel per service: false = not ready, true = healthy.
     let mut ready_txs: std::collections::HashMap<&str, watch::Sender<bool>> =

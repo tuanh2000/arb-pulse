@@ -1,0 +1,44 @@
+# Prometheus scrape config for the arb-pulse monitoring stack.
+#
+# The Rust services run on the HOST (cargo run / orchestrator), each exposing a
+# Prometheus exporter on its own port (see arb-metrics::ports). Prometheus runs
+# in a container, so it reaches the host via `host.docker.internal` (Docker
+# Desktop on macOS/Windows; on Linux the compose file adds a host-gateway alias).
+# The infra exporters run as containers and are reached by service name.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: listener
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+
+  - job_name: pool-registry
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+
+  - job_name: opportunity-finder
+    static_configs:
+      - targets: ["host.docker.internal:9102"]
+
+  - job_name: broadcaster
+    static_configs:
+      - targets: ["host.docker.internal:9103"]
+
+  - job_name: orchestrator
+    static_configs:
+      - targets: ["host.docker.internal:9104"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis_exporter:9121"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres_exporter:9187"]

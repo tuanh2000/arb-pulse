@@ -39,3 +39,7 @@ anyhow = "1"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# Prometheus metrics
+arb-metrics = { path = "../metrics" }
+metrics = "0.24"

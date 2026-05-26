@@ -89,6 +89,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    arb_metrics::init(arb_metrics::ports::OPPORTUNITY_FINDER);
+
     let cfg = config::AppConfig::load()?;
     let token_in = cfg.token_in_address()?;
     info!(
@@ -116,10 +118,32 @@ async fn main() -> Result<()> {
     };
 
     // 1. Load the pool snapshot the listener wrote to Redis.
-    let pools = source::load_snapshot(&cfg.redis.url).await?;
-    if pools.is_empty() {
-        warn!("no pools found in Redis — is the listener running?");
-    }
+    // Retry until non-empty: the listener's Multicall3 seed can take 30-120 s,
+    // so the finder may start before `pool:*` keys exist.
+    const SNAPSHOT_RETRY_SECS: u64 = 5;
+    const SNAPSHOT_MAX_ATTEMPTS: usize = 24; // up to 2 min total
+    let mut attempt = 0usize;
+    let pools = loop {
+        let p = source::load_snapshot(&cfg.redis.url).await?;
+        if !p.is_empty() {
+            break p;
+        }
+        attempt += 1;
+        if attempt >= SNAPSHOT_MAX_ATTEMPTS {
+            anyhow::bail!(
+                "No pools in Redis after {} attempts ({}s). Is the listener running?",
+                SNAPSHOT_MAX_ATTEMPTS,
+                SNAPSHOT_MAX_ATTEMPTS as u64 * SNAPSHOT_RETRY_SECS
+            );
+        }
+        warn!(
+            attempt,
+            max = SNAPSHOT_MAX_ATTEMPTS,
+            retry_secs = SNAPSHOT_RETRY_SECS,
+            "no pools in Redis snapshot — listener still seeding, retrying..."
+        );
+        tokio::time::sleep(Duration::from_secs(SNAPSHOT_RETRY_SECS)).await;
+    };
     let store = PoolStore::from_pools(pools.clone());
     info!(pools = store.len(), "Loaded pool snapshot");
 
@@ -162,6 +186,7 @@ async fn main() -> Result<()> {
         if let Some(opp) = evaluate(cycle, &store, &params) {
             handle_confirmed(&opp, &db_pool, &emitter, params.token_in_decimals, "initial", None)
                 .await;
+            metrics::counter!("finder_opportunities_total", "phase" => "initial").increment(1);
             emitted += 1;
         }
     }
@@ -225,6 +250,8 @@ async fn main() -> Result<()> {
             };
             store.update_reserves(addr, r0, r1, update.block);
             updates_processed += 1;
+            metrics::counter!("finder_updates_processed_total").increment(1);
+            metrics::gauge!("finder_pools_tracked").set(store.len() as f64);
 
             // Latency from the block's on-chain creation to this detection. Measured
             // now (when we react to the update), not later after DB/emit I/O. None
@@ -234,7 +261,11 @@ async fn main() -> Result<()> {
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                Some(now_ms.saturating_sub(update.block_ts * 1000))
+                let lag = now_ms.saturating_sub(update.block_ts * 1000);
+                // Pipeline latency for EVERY processed update (block creation -> the
+                // finder reacting), independent of whether an opportunity is found.
+                metrics::histogram!("finder_block_age_ms").record(lag as f64);
+                Some(lag)
             } else {
                 None
             };
@@ -242,6 +273,7 @@ async fn main() -> Result<()> {
             let Some(cycle_idxs) = index.get(&addr) else {
                 // Reserve update for a pool that is not part of any cycle.
                 updates_ignored += 1;
+                metrics::counter!("finder_updates_ignored_total").increment(1);
                 continue;
             };
 
@@ -253,6 +285,15 @@ async fn main() -> Result<()> {
                     }
                     last_emitted.insert(i, update.block);
                     opps_found += 1;
+                    // Page-3 metric: latency from block creation to opportunity
+                    // detection. Recorded only when the listener attached a block
+                    // timestamp; observed here, before DB/emit I/O.
+                    if let Some(lat) = detect_latency_ms {
+                        metrics::histogram!("finder_opportunity_detect_latency_ms")
+                            .record(lat as f64);
+                    }
+                    metrics::counter!("finder_opportunities_total", "phase" => "live").increment(1);
+                    metrics::gauge!("finder_last_net_profit").set(opp.net_profit_token_in);
                     handle_confirmed(
                         &opp,
                         &db_pool,

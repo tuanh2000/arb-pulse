@@ -101,6 +101,21 @@ async fn run_inner(config: &AppConfig, store: &PoolStore, sink: &RedisSink) -> R
                 matched += 1;
                 total_matched += 1;
 
+                // Metrics: a Sync applied to a curated pool. block_age_ms is the lag
+                // from the block's on-chain creation to the moment we processed it,
+                // the listener's slice of the end-to-end detection latency.
+                metrics::counter!("listener_sync_events_total").increment(1);
+                metrics::gauge!("listener_last_block").set(update.block as f64);
+                metrics::gauge!("listener_pools_tracked").set(store.len() as f64);
+                if block_ts > 0 {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    metrics::histogram!("listener_block_age_ms")
+                        .record(now_ms.saturating_sub(block_ts * 1000) as f64);
+                }
+
                 // Confirm the pipeline end-to-end on the very first matched update,
                 // so liveness is visible immediately instead of after 30s.
                 if !first_update_logged {
@@ -192,6 +207,7 @@ pub async fn run(
             Ok(()) => return Ok(()),
             Err(e) => {
                 attempt += 1;
+                metrics::counter!("listener_ws_reconnects_total").increment(1);
                 if attempt >= MAX_RETRIES {
                     tracing::error!(
                         attempt,

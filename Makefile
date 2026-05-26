@@ -18,13 +18,19 @@
 #
 #  make build                     cargo build --workspace (all crates)
 #  make build-release             cargo build --release --workspace
+#
+#  make monitoring                start Prometheus + Grafana + exporters (docker)
+#  make stop-monitoring           stop the monitoring stack
+#                                 Grafana    -> http://localhost:3030 (admin/admin)
+#                                 Prometheus -> http://localhost:9090
 # ─────────────────────────────────────────────────────────────────────────────
 
 SHELL := /usr/bin/env bash
 .PHONY: up up-scripts down status build build-release orchestrator \
         infra pool-registry listener opportunity-finder broadcaster deploy-contract \
         stop-infra stop-pool-registry stop-listener stop-opportunity-finder stop-broadcaster \
-        restart-pool-registry restart-listener restart-opportunity-finder restart-broadcaster
+        restart-pool-registry restart-listener restart-opportunity-finder restart-broadcaster \
+        monitoring stop-monitoring
 
 # ── Full stack ────────────────────────────────────────────────────────────────
 
@@ -104,6 +110,16 @@ restart-opportunity-finder:
 
 restart-broadcaster:
 	@scripts/agent-broadcaster.sh restart
+
+# ── Monitoring stack (Prometheus + Grafana + exporters) ─────────────────────────
+
+monitoring:
+	@docker-compose up -d prometheus grafana redis_exporter postgres_exporter
+	@echo "Grafana:    http://localhost:3030  (admin/admin)"
+	@echo "Prometheus: http://localhost:9090"
+
+stop-monitoring:
+	@docker-compose stop prometheus grafana redis_exporter postgres_exporter
 
 # ── Log tailing ───────────────────────────────────────────────────────────────
 

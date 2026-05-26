@@ -206,6 +206,8 @@ async fn resolve_confirmed<P: Provider>(
     match provider.get_transaction_receipt(hash).await {
         Ok(Some(r)) => {
             if r.status() {
+                metrics::counter!("broadcaster_tx_total", "status" => "success").increment(1);
+                metrics::histogram!("broadcaster_gas_used").record(r.gas_used as f64);
                 info!(nonce, tx = %hash, block = ?r.block_number, "arb tx mined OK");
                 if let (Some(pool), Some(id)) = (db, arb_id) {
                     if let Err(e) =
@@ -216,6 +218,8 @@ async fn resolve_confirmed<P: Provider>(
                     }
                 }
             } else {
+                metrics::counter!("broadcaster_tx_total", "status" => "reverted").increment(1);
+                metrics::histogram!("broadcaster_gas_used").record(r.gas_used as f64);
                 warn!(nonce, tx = %hash, block = ?r.block_number, "arb tx reverted on-chain");
                 if let (Some(pool), Some(id)) = (db, arb_id) {
                     if let Err(e) =
@@ -229,6 +233,7 @@ async fn resolve_confirmed<P: Provider>(
         Ok(None) => {
             // The nonce advanced but our hash isn't the tx that mined — a
             // replacement or an external tx took the slot.
+            metrics::counter!("broadcaster_tx_total", "status" => "superseded").increment(1);
             warn!(nonce, tx = %hash, "nonce confirmed but our hash not found (superseded)");
             if let (Some(pool), Some(id)) = (db, arb_id) {
                 if let Err(e) =

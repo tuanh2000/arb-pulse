@@ -1,0 +1,129 @@
+{
+  "uid": "arb-pools",
+  "title": "Arb Pulse — Pool State",
+  "tags": ["arb-pulse"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-5m", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Pools tracked (listener)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "fixed", "fixedColor": "blue" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "value" },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "listener_pools_tracked", "instant": true } ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Registry pools (total)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "value" },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "registry_pools_total", "instant": true } ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Registry pools with TVL",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "fixed", "fixedColor": "green" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "value" },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "registry_pools_with_tvl", "instant": true } ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Tokens pending metadata",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "fixed", "fixedColor": "orange" } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value", "graphMode": "area", "textMode": "value" },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "registry_tokens_pending", "instant": true } ]
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Live pool reserves (listener)",
+      "description": "Live in-memory reserve state the listener mirrors to Redis, read from its HTTP API. Reserves are raw on-chain integers (not decimal-adjusted).",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity" },
+      "gridPos": { "h": 16, "w": 14, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Block" }, "properties": [ { "id": "custom.width", "value": 90 } ] },
+          { "matcher": { "id": "byName", "options": "Fee bps" }, "properties": [ { "id": "custom.width", "value": 80 } ] }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [ { "displayName": "Block", "desc": true } ] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity" },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://host.docker.internal:3000/pools",
+          "url_options": { "method": "GET" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "dex_name", "text": "DEX", "type": "string" },
+            { "selector": "pair_address", "text": "Pair", "type": "string" },
+            { "selector": "token0", "text": "Token0", "type": "string" },
+            { "selector": "token1", "text": "Token1", "type": "string" },
+            { "selector": "reserve0", "text": "Reserve0", "type": "number" },
+            { "selector": "reserve1", "text": "Reserve1", "type": "number" },
+            { "selector": "fee_bps", "text": "Fee bps", "type": "number" },
+            { "selector": "last_updated_block", "text": "Block", "type": "number" }
+          ],
+          "filters": []
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Pool TVL (pool-registry)",
+      "description": "Curated pool set with USD TVL from the pool-registry. Sorted by TVL descending.",
+      "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity" },
+      "gridPos": { "h": 16, "w": 10, "x": 14, "y": 4 },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "filterable": true } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "TVL (USD)" }, "properties": [ { "id": "unit", "value": "currencyUSD" }, { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } } ] }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [ { "displayName": "TVL (USD)", "desc": true } ] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "yesoreyeram-infinity-datasource", "uid": "infinity" },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://host.docker.internal:3001/pools?min_tvl=0&include_null=true",
+          "url_options": { "method": "GET" },
+          "root_selector": "",
+          "columns": [
+            { "selector": "protocol", "text": "DEX", "type": "string" },
+            { "selector": "pool_address", "text": "Pair", "type": "string" },
+            { "selector": "tvl", "text": "TVL (USD)", "type": "number" },
+            { "selector": "updated_at", "text": "Updated", "type": "timestamp" }
+          ],
+          "filters": []
+        }
+      ]
+    }
+  ]
+}

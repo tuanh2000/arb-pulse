@@ -24,6 +24,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    arb_metrics::init(arb_metrics::ports::LISTENER);
+
     let config = config::AppConfig::load()?;
     info!(
         chain_id = config.network.chain_id,
@@ -53,6 +55,7 @@ async fn main() -> Result<()> {
     for s in states {
         store.insert(s);
     }
+    metrics::gauge!("listener_pools_tracked").set(store.len() as f64);
     info!(pools = store.len(), "Pool state initialized");
 
     // Seed Redis with the initial snapshot before going live.

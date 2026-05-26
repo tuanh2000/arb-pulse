@@ -38,6 +38,9 @@ pub async fn run(
             }
         }
 
+        metrics::counter!("service_restarts_total", "service" => spec.name).increment(1);
+        metrics::gauge!("orchestrator_service_ready", "service" => spec.name).set(0.0);
+
         db::log_event(
             &db,
             spec.name,
@@ -138,6 +141,7 @@ async fn spawn_and_monitor(
 
     tracing::info!(service = spec.name, pid, "healthy");
     db::log_event(db, spec.name, "healthy", Some(pid), None).await;
+    metrics::gauge!("orchestrator_service_ready", "service" => spec.name).set(1.0);
     let _ = ready_tx.send(true);
 
     // Monitor: periodic health check + wait for process death.

@@ -16,7 +16,7 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
 use tracing::{error, info, warn};
 use types::Opportunity;
@@ -33,6 +33,9 @@ const SEND_QUEUE_CAP: usize = 32;
 struct ReadyToSend {
     opp: Opportunity,
     data: Vec<u8>,
+    /// When the opportunity was received from Redis, for the receive->broadcast
+    /// latency metric (`broadcaster_send_latency_ms`).
+    received_at: Instant,
 }
 
 #[tokio::main]
@@ -145,6 +148,8 @@ async fn main() -> Result<()> {
     let mut stream = pubsub.on_message();
     info!("Listening for opportunities on channel '{channel}'...");
 
+    arb_metrics::init(arb_metrics::ports::BROADCASTER);
+
     let max_age = cfg.broadcaster.max_opportunity_age_blocks;
     let do_simulate = cfg.broadcaster.simulate;
     let sim_sem = Arc::new(Semaphore::new(SIM_CONCURRENCY));
@@ -157,6 +162,7 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+        let received_at = Instant::now();
         let opp: Opportunity = match serde_json::from_str(&payload) {
             Ok(o) => o,
             Err(e) => {
@@ -164,10 +170,12 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+        metrics::counter!("broadcaster_opportunities_received_total").increment(1);
 
         // Local staleness check — no RPC round-trip.
         let current = current_tip.load(Ordering::Relaxed);
         if opp.block != 0 && current > 0 && current > opp.block + max_age {
+            metrics::counter!("broadcaster_tx_total", "status" => "dropped_stale").increment(1);
             warn!(
                 opp_block = opp.block,
                 tip = current,
@@ -205,7 +213,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            if ready_tx2.send(ReadyToSend { opp, data }).await.is_err() {
+            if ready_tx2.send(ReadyToSend { opp, data, received_at }).await.is_err() {
                 warn!("send channel closed — broadcaster shutting down");
             }
         });
@@ -241,6 +249,7 @@ async fn send_loop<P>(
             && current > 0
             && current > ready.opp.block + cfg.max_opportunity_age_blocks
         {
+            metrics::counter!("broadcaster_tx_total", "status" => "dropped_stale").increment(1);
             warn!(
                 opp_block = ready.opp.block,
                 tip = current,
@@ -290,6 +299,9 @@ async fn send_loop<P>(
         .await
         {
             Ok((tx_hash, used_fees)) => {
+                metrics::counter!("broadcaster_tx_total", "status" => "sent").increment(1);
+                metrics::histogram!("broadcaster_send_latency_ms")
+                    .record(ready.received_at.elapsed().as_secs_f64() * 1000.0);
                 info!(
                     tx = %tx_hash,
                     nonce,
@@ -307,6 +319,7 @@ async fn send_loop<P>(
                 }
             }
             Err(e) => {
+                metrics::counter!("broadcaster_tx_total", "status" => "failed").increment(1);
                 // `{:#}` prints the full anyhow cause chain on one line — the bare
                 // Display only shows the top context ("send_transaction").
                 let err_chain = format!("{e:#}");
