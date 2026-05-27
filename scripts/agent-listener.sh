@@ -14,9 +14,9 @@ case "$cmd" in
 start)
     require_binary "listener"
 
-    # Precondition: pool-registry must be up so the listener can load its pool list.
+    # Precondition: pool-registry-metadata must be up so the listener can load its pool list.
     if ! curl -sf http://127.0.0.1:3001/health >/dev/null 2>&1; then
-        echo "[$NAME] ERROR: pool-registry not reachable at :3001 — start it first" >&2
+        echo "[$NAME] ERROR: pool-registry-metadata not reachable at :3001 — run 'make pool-registry-all' first" >&2
         exit 1
     fi
 

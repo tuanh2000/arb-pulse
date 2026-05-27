@@ -420,19 +420,37 @@ pub struct TokenMetadataInput {
 /// present in `token_metadata`. These are the tokens the metadata worker must resolve.
 pub async fn get_tokens_missing_metadata(pool: &PgPool, limit: i64) -> Result<Vec<String>> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT t.addr FROM (
-             SELECT token0 AS addr FROM pools WHERE token0 IS NOT NULL
-             UNION
-             SELECT token1 AS addr FROM pools WHERE token1 IS NOT NULL
-         ) t
-         LEFT JOIN token_metadata m ON m.token_address = LOWER(t.addr)
-         WHERE m.token_address IS NULL
+        "SELECT token_address FROM token_metadata
+         WHERE metadata_fetched_at IS NULL
          LIMIT $1",
     )
     .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows.into_iter().map(|(a,)| a).collect())
+}
+
+/// Insert stub rows for token addresses that have no metadata entry yet.
+/// Called immediately after token0/token1 are resolved so every known token
+/// appears in the listing even before the metadata worker fetches ERC-20 data.
+pub async fn upsert_token_stubs(pool: &PgPool, addresses: &[String]) -> Result<()> {
+    if addresses.is_empty() {
+        return Ok(());
+    }
+    let mut unique: Vec<String> = addresses.iter().map(|a| a.to_lowercase()).collect();
+    unique.sort_unstable();
+    unique.dedup();
+    let mut tx = pool.begin().await?;
+    for addr in &unique {
+        sqlx::query(
+            "INSERT INTO token_metadata (token_address) VALUES ($1) ON CONFLICT (token_address) DO NOTHING",
+        )
+        .bind(addr)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Upsert token metadata. On conflict, only overwrites a column when the new value
@@ -445,13 +463,14 @@ pub async fn upsert_token_metadata(pool: &PgPool, rows: &[TokenMetadataInput]) -
     let mut upserted = 0u64;
     for r in rows {
         let affected = sqlx::query(
-            "INSERT INTO token_metadata (token_address, symbol, name, decimals)
-             VALUES ($1, $2, $3, $4)
+            "INSERT INTO token_metadata (token_address, symbol, name, decimals, metadata_fetched_at)
+             VALUES ($1, $2, $3, $4, NOW())
              ON CONFLICT (token_address) DO UPDATE
-             SET symbol     = COALESCE(EXCLUDED.symbol, token_metadata.symbol),
-                 name       = COALESCE(EXCLUDED.name, token_metadata.name),
-                 decimals   = COALESCE(EXCLUDED.decimals, token_metadata.decimals),
-                 updated_at = NOW()",
+             SET symbol               = COALESCE(EXCLUDED.symbol, token_metadata.symbol),
+                 name                 = COALESCE(EXCLUDED.name, token_metadata.name),
+                 decimals             = COALESCE(EXCLUDED.decimals, token_metadata.decimals),
+                 metadata_fetched_at  = NOW(),
+                 updated_at           = NOW()",
         )
         .bind(r.token_address.to_lowercase())
         .bind(&r.symbol)
@@ -547,15 +566,18 @@ pub async fn get_unscreened_base_pools(
 }
 
 /// Record a screening result: set `is_fot` and `screened_at` for one token.
-pub async fn mark_token_screened(pool: &PgPool, token: &str, is_fot: bool) -> Result<()> {
+pub async fn mark_token_screened(pool: &PgPool, token: &str, is_fot: bool, fee_bps: Option<u16>) -> Result<()> {
     sqlx::query(
-        "INSERT INTO token_metadata (token_address, is_fot, screened_at)
-         VALUES (lower($1), $2, NOW())
+        "INSERT INTO token_metadata (token_address, is_fot, transfer_fee_bps, screened_at)
+         VALUES (lower($1), $2, $3, NOW())
          ON CONFLICT (token_address) DO UPDATE
-         SET is_fot = EXCLUDED.is_fot, screened_at = NOW()",
+         SET is_fot = EXCLUDED.is_fot,
+             transfer_fee_bps = EXCLUDED.transfer_fee_bps,
+             screened_at = NOW()",
     )
     .bind(token)
     .bind(is_fot)
+    .bind(fee_bps.map(|b| b as i16))
     .execute(pool)
     .await?;
     Ok(())
@@ -573,36 +595,10 @@ pub async fn list_token_metadata(pool: &PgPool, limit: i64) -> Result<Vec<TokenM
     Ok(rows)
 }
 
-// ── meme_screener ───────────────────────────────────────────────────────────────
-
-/// A token that has metadata resolved but has not yet been classified for meme
-/// status. Fed to the meme screener for keyword-based classification.
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct PendingMemeToken {
-    pub token_address: String,
-    pub symbol: Option<String>,
-    pub name: Option<String>,
-}
-
-/// Tokens that have a symbol or name in `token_metadata` but whose
-/// `meme_screened_at` is NULL (not yet classified). Ordered by address for
-/// stable batching so repeated runs make forward progress.
-pub async fn get_tokens_pending_meme_classification(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<PendingMemeToken>> {
-    let rows = sqlx::query_as::<_, PendingMemeToken>(
-        "SELECT token_address, symbol, name FROM token_metadata
-         WHERE meme_screened_at IS NULL
-           AND (symbol IS NOT NULL OR name IS NOT NULL)
-         ORDER BY token_address
-         LIMIT $1",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
-}
+// ── meme ────────────────────────────────────────────────────────────────────────
+// Meme status is derived entirely from the FoT screener: a token is labelled
+// meme if and only if it is detected as fee-on-transfer. The functions below
+// write that label and propagate it to the pools table.
 
 /// Record a meme classification result for one token. If the token is flagged,
 /// also sets `has_meme_token = TRUE` on every pool that contains it. Both

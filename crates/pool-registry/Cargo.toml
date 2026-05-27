@@ -4,8 +4,16 @@ version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "pool-registry"
-path = "src/main.rs"
+name = "pool-registry-metadata"
+path = "src/bin/metadata.rs"
+
+[[bin]]
+name = "pool-registry-price"
+path = "src/bin/price.rs"
+
+[[bin]]
+name = "pool-registry-tvl"
+path = "src/bin/tvl.rs"
 
 [dependencies]
 # Blockchain (pair enumeration directly from chain)

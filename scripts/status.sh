@@ -38,10 +38,14 @@ fi
 # ── Rust agents ───────────────────────────────────────────────────────────────
 echo ""
 echo "Rust agents:"
-_svc_line "pool-registry"       "http://127.0.0.1:3001/health"
-_svc_line "listener"            "http://127.0.0.1:3000/health"
+_svc_line "pool-registry-metadata"  "http://127.0.0.1:3001/health"
+_svc_line "pool-registry-price"     "http://127.0.0.1:3002/health"
+_svc_line "pool-registry-tvl"       "http://127.0.0.1:3003/health"
+_svc_line "listener"                "http://127.0.0.1:3000/health"
 _svc_line "opportunity-finder"
 _svc_line "broadcaster"
+_svc_line "arb-api"                 "http://127.0.0.1:4000/health"
+_svc_line "web-frontend"
 
 # ── Contract ──────────────────────────────────────────────────────────────────
 echo ""

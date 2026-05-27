@@ -22,6 +22,10 @@ pub mod ports {
     pub const OPPORTUNITY_FINDER: u16 = 9102;
     pub const BROADCASTER: u16 = 9103;
     pub const ORCHESTRATOR: u16 = 9104;
+    // Split pool-registry services
+    pub const POOL_REGISTRY_METADATA: u16 = 9105;
+    pub const POOL_REGISTRY_PRICE: u16 = 9106;
+    pub const POOL_REGISTRY_TVL: u16 = 9107;
 }
 
 /// Latency buckets (milliseconds). PulseChain blocks are ~10s apart, so a healthy

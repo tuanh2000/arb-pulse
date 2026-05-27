@@ -54,7 +54,7 @@ fn is_short_delivery(requested: U256, received: U256) -> bool {
 /// reverted; we do NOT mark such tokens so they are retried on a later cycle.
 enum Probe {
     Clean,
-    Fot,
+    Fot { fee_bps: u16 },
     Indeterminate,
 }
 
@@ -125,14 +125,21 @@ async fn probe<P: Provider>(
     };
 
     if is_short_delivery(ret.requested, ret.received) {
-        return Probe::Fot;
+        let fee_bps = if ret.requested > U256::ZERO {
+            ((ret.requested - ret.received) * U256::from(10_000u64) / ret.requested)
+                .try_into()
+                .unwrap_or(10_000u16)
+        } else {
+            0u16
+        };
+        return Probe::Fot { fee_bps };
     }
 
     // Clean delivery: also flag gas-heavy / hook tokens by the probe's gas cost.
     match provider.estimate_gas(tx).overrides(overrides).await {
         Ok(gas) if gas > gas_threshold => {
             tracing::debug!(token = %token_out, gas, threshold = gas_threshold, "FoT screener: gas-heavy token");
-            Probe::Fot
+            Probe::Fot { fee_bps: 0 }
         }
         Ok(_) => Probe::Clean,
         // Gas estimation failing on an otherwise-clean swap is unusual; treat as
@@ -271,31 +278,46 @@ pub async fn run(pool: sqlx::PgPool, rpc_url: String, cfg: FotScreenerConfig) {
                 }
             };
 
-            let is_fot = match probe(
+            let probe_result = probe(
                 &provider, scratch, pair, base_a, token_a, slot, cfg.gas_threshold,
             )
-            .await
-            {
-                Probe::Fot => true,
-                Probe::Clean => false,
+            .await;
+
+            let (is_fot, fee_bps) = match probe_result {
+                Probe::Fot { fee_bps } => (true, Some(fee_bps)),
+                Probe::Clean => (false, None),
                 Probe::Indeterminate => {
                     skipped += 1;
-                    // small delay then move on; leave unscreened to retry
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
             };
 
-            if let Err(e) = db::mark_token_screened(&pool, token, is_fot).await {
+            if let Err(e) = db::mark_token_screened(&pool, token, is_fot, fee_bps).await {
                 tracing::warn!(token = %token, error = %e, "FoT screener: mark_token_screened failed");
-            } else if is_fot {
-                flagged += 1;
             } else {
-                clean += 1;
+                if is_fot {
+                    if let Err(e) = db::mark_token_meme(&pool, token, true).await {
+                        tracing::warn!(token = %token, error = %e, "FoT screener: mark_token_meme failed");
+                    }
+                    flagged += 1;
+                } else {
+                    clean += 1;
+                }
             }
 
             // Be gentle on the RPC between probes.
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // Sync pool flags for tokens whose pool identity was resolved after their
+        // initial screening (handles race between chain seeder and screener).
+        match db::sync_pool_meme_flags(&pool).await {
+            Ok(synced) if synced > 0 => {
+                tracing::info!(synced, "FoT screener: synced stale pool meme flags");
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "FoT screener: pool meme flag sync failed"),
         }
 
         tracing::info!(

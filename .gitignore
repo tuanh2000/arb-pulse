@@ -24,6 +24,10 @@ run/
 # macOS
 .DS_Store
 
+# Next.js
+web/.next/
+web/node_modules/
+
 # IDE
 .idea/
 .vscode/

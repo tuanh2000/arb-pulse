@@ -131,52 +131,6 @@ fn default_fot_interval_secs() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemeScreenerConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_meme_batch_size")]
-    pub batch_size: i64,
-    #[serde(default = "default_meme_interval_secs")]
-    pub interval_secs: u64,
-    /// Case-insensitive substrings matched against token symbol and name.
-    /// Any match flags the token as a meme coin and excludes its pools from /pools.
-    #[serde(default = "default_meme_keywords")]
-    pub keywords: Vec<String>,
-    /// Explicit token addresses to hard-flag as meme regardless of keywords.
-    /// Seeded into `token_metadata.is_meme` at startup.
-    #[serde(default)]
-    pub denylist: Vec<String>,
-}
-
-impl Default for MemeScreenerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            batch_size: default_meme_batch_size(),
-            interval_secs: default_meme_interval_secs(),
-            keywords: default_meme_keywords(),
-            denylist: Vec::new(),
-        }
-    }
-}
-
-fn default_meme_batch_size() -> i64 {
-    500
-}
-fn default_meme_interval_secs() -> u64 {
-    60
-}
-fn default_meme_keywords() -> Vec<String> {
-    [
-        "DOGE", "SHIB", "SHIBA", "PEPE", "BABY", "MOON", "INU", "FLOKI", "MEME", "WOJAK",
-        "BONK", "CHAD", "SNEK", "ELON", "HAMSTER",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub network: NetworkConfig,
     pub dexes: Vec<ChainDexConfig>,
@@ -188,9 +142,6 @@ pub struct AppConfig {
     /// Absence in the TOML = disabled (serde default).
     #[serde(default)]
     pub fot_screener: FotScreenerConfig,
-    /// Absence in the TOML = disabled (serde default).
-    #[serde(default)]
-    pub meme_screener: MemeScreenerConfig,
 }
 
 impl AppConfig {

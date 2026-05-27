@@ -100,6 +100,7 @@ pub async fn populate_tokens(db_pool: &PgPool, cfg: &AppConfig) -> Result<()> {
         let refs: Vec<&PoolRecord> = chunk.iter().collect();
         match reserve_fetcher::fetch_batch(&provider, &refs).await {
             Ok(states) => {
+                let mut stub_addrs: Vec<String> = Vec::new();
                 for (rec, st) in chunk.iter().zip(states.iter()) {
                     if let Some(s) = st {
                         if let Err(e) = db::update_pool_tokens(
@@ -114,9 +115,16 @@ pub async fn populate_tokens(db_pool: &PgPool, cfg: &AppConfig) -> Result<()> {
                         {
                             tracing::warn!(pool = %rec.pool_address, error = %e, "update_pool_tokens failed");
                         } else {
+                            stub_addrs.push(s.token0.clone());
+                            stub_addrs.push(s.token1.clone());
                             filled += 1;
                         }
                     }
+                }
+                // Ensure every resolved token has a stub metadata row so it
+                // appears in the /api/tokens listing before the metadata worker runs.
+                if let Err(e) = db::upsert_token_stubs(db_pool, &stub_addrs).await {
+                    tracing::warn!(error = %e, "upsert_token_stubs failed — tokens may be missing from listing");
                 }
             }
             Err(e) => tracing::warn!(error = %e, "Token-fill batch failed (RPC) — skipping"),

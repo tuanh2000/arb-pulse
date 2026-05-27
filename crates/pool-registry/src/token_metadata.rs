@@ -37,8 +37,8 @@ sol! {
 
 const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
 
-// 3 calls/token × 60 = 180 calls per aggregate3 — well within RPC limits.
-const CHUNK_SIZE: usize = 60;
+// 3 calls/token × 20 = 60 calls per aggregate3 — conservative for public RPCs.
+const CHUNK_SIZE: usize = 20;
 
 pub struct TokenMeta {
     pub symbol: Option<String>,

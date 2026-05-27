@@ -6,15 +6,25 @@
 #  make status                    health overview of every component
 #
 #  make infra                     start postgres + redis (docker-compose)
-#  make pool-registry             start pool-registry agent (port 3001)
 #  make listener                  start listener agent      (port 3000)
 #  make opportunity-finder        start opportunity-finder agent
 #  make broadcaster               start transaction-broadcaster (needs PRIVATE_KEY)
 #  make deploy-contract           deploy ArbExecutor to PulseChain (needs PRIVATE_KEY)
 #
+#  Pool-registry (split services):
+#  make pool-registry-all         start all three pool-registry services
+#  make pool-registry-tvl         seeder + TVL worker          (API :3003, metrics :9107)
+#  make pool-registry-price       price oracle                 (API :3002, metrics :9106)
+#  make pool-registry-metadata    metadata + FoT/meme screener (API :3001, metrics :9105)
+#
+#  Web stack:
+#  make web                       start arb-api (:4000) + Next.js frontend (:3100)
+#  make stop-web                  stop arb-api + frontend
+#  make restart-web               restart web stack
+#
 #  make stop-<agent>              e.g. make stop-listener
-#  make restart-<agent>           e.g. make restart-pool-registry
-#  make logs-<agent>              tail live logs,  e.g. make logs-opportunity-finder
+#  make restart-<agent>           e.g. make restart-pool-registry-metadata
+#  make logs-<agent>              tail live logs, e.g. make logs-pool-registry-tvl
 #
 #  make build                     cargo build --workspace (all crates)
 #  make build-release             cargo build --release --workspace
@@ -27,9 +37,13 @@
 
 SHELL := /usr/bin/env bash
 .PHONY: up up-scripts down status build build-release orchestrator \
-        infra pool-registry listener opportunity-finder broadcaster deploy-contract \
-        stop-infra stop-pool-registry stop-listener stop-opportunity-finder stop-broadcaster \
-        restart-pool-registry restart-listener restart-opportunity-finder restart-broadcaster \
+        infra listener opportunity-finder broadcaster deploy-contract \
+        pool-registry-all pool-registry-tvl pool-registry-price pool-registry-metadata \
+        stop-pool-registry-all stop-pool-registry-tvl stop-pool-registry-price stop-pool-registry-metadata \
+        restart-pool-registry-all restart-pool-registry-tvl restart-pool-registry-price restart-pool-registry-metadata \
+        web stop-web restart-web \
+        stop-infra stop-listener stop-opportunity-finder stop-broadcaster \
+        restart-listener restart-opportunity-finder restart-broadcaster \
         monitoring stop-monitoring
 
 # ── Full stack ────────────────────────────────────────────────────────────────
@@ -60,13 +74,64 @@ build-release:
 orchestrator:
 	cargo build -p orchestrator && ./target/debug/orchestrator
 
-# ── Individual agents — start ─────────────────────────────────────────────────
+# ── Infrastructure ────────────────────────────────────────────────────────────
 
 infra:
 	@scripts/agent-infra.sh start
 
-pool-registry:
-	@scripts/agent-pool-registry.sh start
+stop-infra:
+	@scripts/agent-infra.sh stop
+
+# ── Pool-registry (split services) ───────────────────────────────────────────
+
+pool-registry-all:
+	@scripts/agent-pool-registry-all.sh start
+
+pool-registry-tvl:
+	@scripts/agent-pool-registry-tvl.sh start
+
+pool-registry-price:
+	@scripts/agent-pool-registry-price.sh start
+
+pool-registry-metadata:
+	@scripts/agent-pool-registry-metadata.sh start
+
+stop-pool-registry-all:
+	@scripts/agent-pool-registry-all.sh stop
+
+stop-pool-registry-tvl:
+	@scripts/agent-pool-registry-tvl.sh stop
+
+stop-pool-registry-price:
+	@scripts/agent-pool-registry-price.sh stop
+
+stop-pool-registry-metadata:
+	@scripts/agent-pool-registry-metadata.sh stop
+
+restart-pool-registry-all:
+	@scripts/agent-pool-registry-all.sh restart
+
+restart-pool-registry-tvl:
+	@scripts/agent-pool-registry-tvl.sh restart
+
+restart-pool-registry-price:
+	@scripts/agent-pool-registry-price.sh restart
+
+restart-pool-registry-metadata:
+	@scripts/agent-pool-registry-metadata.sh restart
+
+# ── Web stack (arb-api + Next.js) ─────────────────────────────────────────────
+
+web:
+	@scripts/agent-web.sh start
+
+stop-web:
+	@scripts/agent-web.sh stop
+
+restart-web:
+	@scripts/agent-web.sh restart
+
+# ── Other agents ──────────────────────────────────────────────────────────────
 
 listener:
 	@scripts/agent-listener.sh start
@@ -80,14 +145,6 @@ broadcaster:
 deploy-contract:
 	@scripts/agent-contract.sh deploy
 
-# ── Individual agents — stop ──────────────────────────────────────────────────
-
-stop-infra:
-	@scripts/agent-infra.sh stop
-
-stop-pool-registry:
-	@scripts/agent-pool-registry.sh stop
-
 stop-listener:
 	@scripts/agent-listener.sh stop
 
@@ -96,11 +153,6 @@ stop-opportunity-finder:
 
 stop-broadcaster:
 	@scripts/agent-broadcaster.sh stop
-
-# ── Individual agents — restart ───────────────────────────────────────────────
-
-restart-pool-registry:
-	@scripts/agent-pool-registry.sh restart
 
 restart-listener:
 	@scripts/agent-listener.sh restart

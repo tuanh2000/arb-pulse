@@ -25,9 +25,9 @@ echo "── Step 1/5  Infrastructure ──────────────
 "$SCRIPTS/agent-infra.sh" start
 echo ""
 
-# 2. Pool registry (needs postgres)
-echo "── Step 2/5  Pool Registry ──────────────────────"
-"$SCRIPTS/agent-pool-registry.sh" start
+# 2. Pool registry — all three services (tvl + price + metadata)
+echo "── Step 2/5  Pool Registry (all modes) ──────────"
+"$SCRIPTS/agent-pool-registry-all.sh" start
 echo ""
 
 # 3. Listener (needs redis + pool-registry)
